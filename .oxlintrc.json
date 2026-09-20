@@ -1,0 +1,34 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc"],
+  "env": {
+    "node": true
+  },
+  "ignorePatterns": ["dist/**", "out/**", "coverage/**"],
+  "options": {
+    "typeAware": true
+  },
+  "categories": {
+    "correctness": "error"
+  },
+  "rules": {
+    "no-unused-vars": ["error", { "ignoreRestSiblings": false }],
+    "no-useless-rename": "error",
+    "prefer-arrow-callback": "error",
+    "no-param-reassign": ["error", { "props": false }],
+    "typescript/prefer-as-const": "error",
+    "typescript/prefer-enum-initializers": "error",
+    "unicorn/prefer-number-properties": "error",
+    "typescript/no-inferrable-types": "error",
+    "no-else-return": "error",
+    "one-var": ["error", "never"],
+    "no-unsafe-optional-chaining": "warn",
+    "prefer-regex-literals": "warn",
+    "typescript/prefer-optional-chain": "warn",
+    "no-sequences": "warn",
+    "default-param-last": "warn",
+    "typescript/no-explicit-any": "warn",
+    "no-console": "warn",
+    "unicorn/no-array-for-each": "off"
+  }
+}
