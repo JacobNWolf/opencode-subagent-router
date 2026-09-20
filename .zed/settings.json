@@ -113,6 +113,10 @@
         "allowed": false
       }
     },
+    "Markdown": {
+      "soft_wrap": "bounded",
+      "preferred_line_length": 120
+    },
     "JSONC": {
       "tab_size": 2,
       "preferred_line_length": 120,

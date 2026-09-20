@@ -1,22 +1,56 @@
 {
-  "name": "opencode-subagent-router",
+  "name": "@jacobwolf/opencode-subagent-router",
+  "version": "0.1.0",
+  "description": "Route simple OpenCode subagent tasks to faster models with Jev.",
+  "keywords": [
+    "jev",
+    "opencode",
+    "plugin",
+    "routing",
+    "subagent"
+  ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JacobNWolf/opencode-subagent-router.git"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
   "type": "module",
-  "module": "index.ts",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/index.ts"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
     "lint": "oxlint",
-    "lint:ts": "oxlint --type-check"
+    "lint:ts": "oxlint --type-check",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "test:coverage": "bun test --coverage"
+  },
+  "dependencies": {
+    "effect": "4.0.0-beta.83",
+    "es-toolkit": "^1.52.0"
   },
   "devDependencies": {
+    "@opencode-ai/plugin": "1.18.31",
     "@types/bun": "latest",
     "oxfmt": "^0.68.0",
     "oxlint": "^1.83.0",
     "oxlint-tsgolint": "^7.0.2002",
     "typescript": "^7"
   },
-  "peerDependencies": {
-    "typescript": "^7"
+  "engines": {
+    "opencode": ">=1.18.31"
   }
 }
