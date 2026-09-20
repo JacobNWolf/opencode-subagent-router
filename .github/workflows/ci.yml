@@ -9,31 +9,28 @@ permissions: {}
 
 jobs:
   format:
+    name: Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.2
+      - uses: jdx/mise-action@v4
       - run: bun install --frozen-lockfile
       - run: bun run fmt:check
 
   lint:
+    name: Lint JavaScript
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.2
+      - uses: jdx/mise-action@v4
       - run: bun install --frozen-lockfile
       - run: bun run lint
 
   lint-ts:
+    name: Lint TypeScript
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.2
+      - uses: jdx/mise-action@v4
       - run: bun install --frozen-lockfile
       - run: bun run lint:ts
