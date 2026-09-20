@@ -390,7 +390,7 @@ describe('chat.message routing', () => {
   test('routes to a cheaper sibling and removes an inherited variant', async () => {
     const catalog: CatalogModel[] = [
       { providerID: 'openai', id: 'sol', family: 'gpt', cost: { input: 10 } },
-      { providerID: 'openai', id: 'luna', family: 'gpt', cost: { input: 1 } },
+      { providerID: 'openai', id: 'luna', family: 'gpt', tool_call: true, cost: { input: 1 } },
     ];
     const fixture = await hooksFor(
       {
