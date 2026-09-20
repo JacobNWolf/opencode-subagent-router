@@ -82,7 +82,7 @@ export function resolveFast(
       (model) =>
         model.providerID === parent.providerID &&
         model.family === self.family &&
-        model.tool_call !== false &&
+        model.tool_call === true &&
         model.status !== 'deprecated' &&
         costOf(model) < costOf(self),
     ),

@@ -91,10 +91,18 @@ describe('resolveFast', () => {
       { providerID: 'other', id: 'wrong-provider', family: 'gpt', cost: { input: 0 } },
       { providerID: 'openai', id: 'wrong-family', family: 'other', cost: { input: 0 } },
       { providerID: 'openai', id: 'no-tools', family: 'gpt', tool_call: false, cost: { input: 0 } },
+      { providerID: 'openai', id: 'unknown-tools', family: 'gpt', cost: { input: 0 } },
       { providerID: 'openai', id: 'old', family: 'gpt', status: 'deprecated', cost: { input: 0 } },
       { providerID: 'openai', id: 'same-price', family: 'gpt', cost: { input: 10 } },
-      { providerID: 'openai', id: 'terra', family: 'gpt', cost: { input: 5 } },
-      { providerID: 'openai', id: 'luna', family: 'gpt', cost: { input: 1 }, variants: { low: {} } },
+      { providerID: 'openai', id: 'terra', family: 'gpt', tool_call: true, cost: { input: 5 } },
+      {
+        providerID: 'openai',
+        id: 'luna',
+        family: 'gpt',
+        tool_call: true,
+        cost: { input: 1 },
+        variants: { low: {} },
+      },
     ];
     expect(resolveFast({ ...sol, variant: 'medium' }, catalog)).toEqual({
       providerID: 'openai',
@@ -110,7 +118,7 @@ describe('resolveFast', () => {
       family: 'gpt',
       tool_call: true,
     };
-    const cheap = { providerID: 'openai', id: 'luna', family: 'gpt', cost: { input: 1 } };
+    const cheap = { providerID: 'openai', id: 'luna', family: 'gpt', tool_call: true, cost: { input: 1 } };
     expect(resolveFast({ providerID: 'openai', modelID: 'gpt-sol' }, [expensiveWithoutCost, cheap])).toEqual({
       providerID: 'openai',
       modelID: 'luna',
@@ -119,8 +127,8 @@ describe('resolveFast', () => {
   });
 
   test('keeps catalog order when eligible siblings have equal costs', () => {
-    const first = { providerID: 'openai', id: 'first', family: 'gpt', cost: { input: 1 } };
-    const second = { providerID: 'openai', id: 'second', family: 'gpt', cost: { input: 1 } };
+    const first = { providerID: 'openai', id: 'first', family: 'gpt', tool_call: true, cost: { input: 1 } };
+    const second = { providerID: 'openai', id: 'second', family: 'gpt', tool_call: true, cost: { input: 1 } };
     expect(resolveFast({ ...sol, variant: 'medium' }, [self, first, second])).toEqual({
       providerID: 'openai',
       modelID: 'first',
