@@ -1,3 +1,5 @@
+import * as z from 'zod';
+
 const JEV_URL = 'https://openrouter.ai/api/alpha/decisions';
 const JEV_MODEL = 'typesafe/jev-1.13';
 
@@ -33,11 +35,33 @@ export const QUESTIONS = {
   },
 };
 
-export type JevAnswers = {
-  kind: { type: 'choice'; choice: keyof typeof QUESTIONS.kind.criteria; confidence: number };
-  reasoning: { type: 'score'; score: number; confidence: number };
-  keep_parent: { type: 'noul'; noul: number };
-};
+const probability = z.number().min(0).max(1);
+const kindChoices = Object.keys(QUESTIONS.kind.criteria) as [
+  keyof typeof QUESTIONS.kind.criteria,
+  ...(keyof typeof QUESTIONS.kind.criteria)[],
+];
+
+const JevAnswersSchema = z.object({
+  kind: z.object({
+    type: z.literal('choice'),
+    choice: z.enum(kindChoices),
+    confidence: probability,
+  }),
+  reasoning: z.object({
+    type: z.literal('score'),
+    score: z
+      .number()
+      .min(0)
+      .max(QUESTIONS.reasoning.criteria.length - 1),
+    confidence: probability,
+  }),
+  keep_parent: z.object({
+    type: z.literal('noul'),
+    noul: probability,
+  }),
+});
+
+export type JevAnswers = z.infer<typeof JevAnswersSchema>;
 
 type Fetcher = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -69,6 +93,13 @@ export async function askJev(
 
   if (!res.ok) throw new Error(`Jev ${res.status}: ${await res.text()}`);
 
-  const body = (await res.json()) as { answers: JevAnswers };
-  return body.answers;
+  const body: unknown = await res.json();
+  const answers = body && typeof body === 'object' ? (body as Record<string, unknown>).answers : undefined;
+  const parsed = JevAnswersSchema.safeParse(answers);
+
+  if (!parsed.success) {
+    throw new TypeError('Jev returned malformed answers');
+  }
+
+  return parsed.data;
 }

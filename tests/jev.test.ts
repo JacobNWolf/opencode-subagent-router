@@ -70,4 +70,27 @@ describe('askJev', () => {
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toBe('Jev 429: rate limited');
   });
+
+  test('rejects malformed successful responses', async () => {
+    const malformed = [
+      {},
+      { ...result, kind: { ...result.kind, choice: 'invalid' } },
+      { ...result, kind: { ...result.kind, confidence: Number.NaN } },
+      { ...result, reasoning: { ...result.reasoning, score: 3 } },
+      { ...result, reasoning: { ...result.reasoning, confidence: -0.1 } },
+      { ...result, keep_parent: { ...result.keep_parent, noul: Number.POSITIVE_INFINITY } },
+    ];
+
+    for (const answers of malformed) {
+      const fetcher = async () => Response.json({ answers });
+      let error: unknown;
+      try {
+        await askJev({ apiKey: 'key', state: { prompt: 'prompt' }, timeoutMs: 10 }, fetcher);
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error).toBeInstanceOf(TypeError);
+      expect((error as Error).message).toBe('Jev returned malformed answers');
+    }
+  });
 });

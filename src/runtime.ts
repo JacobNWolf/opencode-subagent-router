@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+import * as z from 'zod';
+
 import type { CatalogModel, ModelRef, Route } from './resolve-fast';
 
 export type RouterOptions = {
@@ -35,35 +37,35 @@ type MessageSnapshot = {
   };
 };
 
-type AuthFile = {
-  openrouter?: { key?: unknown };
-};
-
-function isRoute(value: unknown): value is Route {
-  const candidate = value as Partial<Route> | null | undefined;
-  if (typeof candidate?.parent?.model !== 'string' || typeof candidate.fast?.model !== 'string') return false;
-  if (candidate.fast.variant !== undefined && typeof candidate.fast.variant !== 'string') return false;
-
-  const variant = candidate.parent.variant;
-  if (variant === undefined || typeof variant === 'string') return true;
-  return Array.isArray(variant) && variant.every((item) => typeof item === 'string');
-}
+const RouteSchema: z.ZodType<Route> = z.object({
+  parent: z.object({
+    model: z.string(),
+    variant: z.union([z.string(), z.array(z.string())]).optional(),
+  }),
+  fast: z.object({
+    model: z.string(),
+    variant: z.string().optional(),
+  }),
+});
+const positiveNumber = z.number().positive();
+const probability = z.number().min(0).max(1);
+const AuthFileSchema = z.object({
+  openrouter: z.object({ key: z.string().optional() }).optional(),
+});
 
 export function parseOptions(options?: Record<string, unknown>): RouterOptions {
-  let timeoutMs = 2000;
-  if (typeof options?.timeoutMs === 'number' && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0) {
-    timeoutMs = options.timeoutMs;
-  }
-
-  let confidenceMin = 0.5;
-  if (typeof options?.confidenceMin === 'number' && options.confidenceMin >= 0 && options.confidenceMin <= 1) {
-    confidenceMin = options.confidenceMin;
-  }
+  const timeoutMs = positiveNumber.safeParse(options?.timeoutMs);
+  const confidenceMin = probability.safeParse(options?.confidenceMin);
 
   return {
-    timeoutMs,
-    confidenceMin,
-    routes: Array.isArray(options?.routes) ? options.routes.filter(isRoute) : [],
+    timeoutMs: timeoutMs.success ? timeoutMs.data : 2000,
+    confidenceMin: confidenceMin.success ? confidenceMin.data : 0.5,
+    routes: Array.isArray(options?.routes)
+      ? options.routes.flatMap((route) => {
+          const parsed = RouteSchema.safeParse(route);
+          return parsed.success ? [parsed.data] : [];
+        })
+      : [],
   };
 }
 
@@ -117,11 +119,11 @@ export function readOpenCodeOpenRouterKey(
   const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
 
   try {
-    const auth = JSON.parse(readText(join(dataHome, 'opencode', 'auth.json'))) as AuthFile | null;
-    const key = auth?.openrouter?.key;
-    if (typeof key !== 'string') return;
+    const auth = AuthFileSchema.safeParse(JSON.parse(readText(join(dataHome, 'opencode', 'auth.json'))));
+    if (!auth.success) return;
+    const key = auth.data.openrouter?.key;
 
-    const trimmed = key.trim();
+    const trimmed = key?.trim();
     if (trimmed) return trimmed;
   } catch {
     return;
