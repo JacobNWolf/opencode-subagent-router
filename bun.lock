@@ -4,10 +4,8 @@
   "workspaces": {
     "": {
       "name": "opencode-subagent-router",
-      "dependencies": {
-        "@opencode-ai/plugin": "^1.18.31",
-      },
       "devDependencies": {
+        "@opencode-ai/plugin": "^1.18.31",
         "@types/bun": "latest",
         "oxfmt": "^0.68.0",
         "oxlint": "^1.83.0",
