@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 
 import type { Plugin, PluginInput } from '@opencode-ai/plugin';
+import { Effect, Option } from 'effect';
 
+import { openCodeError } from '../src/errors';
 import { createServer, server } from '../src/index';
-import type { JevAnswers } from '../src/jev';
+import { jevTransportError, type JevAnswers } from '../src/jev';
 import type { CatalogModel } from '../src/resolve-fast';
 
 const cheapAnswers: JevAnswers = {
@@ -24,11 +26,14 @@ type ClientSetup = {
   toastFails?: boolean;
   sessionFails?: boolean;
   providers?: unknown;
+  providersFail?: boolean;
+  providersNeverResolve?: boolean;
 };
 
 function makeClient(setup: ClientSetup = {}) {
   const logs: Array<{ level: string; message: string }> = [];
   const toasts: unknown[] = [];
+  let providerCalls = 0;
   const client = {
     app: {
       log: async ({ body }: { body: { level: string; message: string } }) => {
@@ -37,7 +42,12 @@ function makeClient(setup: ClientSetup = {}) {
       },
     },
     config: {
-      providers: async () => ({ data: { providers: setup.providers ?? [] } }),
+      providers: async () => {
+        providerCalls += 1;
+        if (setup.providersFail) throw new Error('providers unavailable');
+        if (setup.providersNeverResolve) await new Promise(() => {});
+        return { data: { providers: setup.providers ?? [] } };
+      },
     },
     session: {
       get: async ({ path }: { path: { id: string } }) => {
@@ -53,7 +63,14 @@ function makeClient(setup: ClientSetup = {}) {
       },
     },
   };
-  return { client: client as unknown as PluginInput['client'], logs, toasts };
+  return {
+    client: client as unknown as PluginInput['client'],
+    logs,
+    toasts,
+    get providerCalls() {
+      return providerCalls;
+    },
+  };
 }
 
 function input(variant: string | undefined = 'high', agent: string | undefined = 'explore') {
@@ -112,11 +129,13 @@ async function hooksFor(
 ) {
   const fixture = makeClient(setup);
   const plugin = createServer({
-    apiKey: () => dependencies.key,
-    loadCatalog: async () => dependencies.catalog ?? variantCatalog(),
-    ask: async () => {
-      if (dependencies.askFails) throw new Error('Jev unavailable');
-      return dependencies.answers ?? cheapAnswers;
+    apiKey: () => Effect.succeed(Option.fromNullishOr(dependencies.key)),
+    loadCatalog: () => Effect.succeed(dependencies.catalog ?? variantCatalog()),
+    ask: () => {
+      if (dependencies.askFails) {
+        return Effect.fail(jevTransportError('request', new Error('Jev unavailable')));
+      }
+      return Effect.succeed(dependencies.answers ?? cheapAnswers);
     },
   });
   const hooks = await plugin({ client: fixture.client } as PluginInput, {
@@ -127,25 +146,145 @@ async function hooksFor(
 }
 
 describe('plugin initialization', () => {
-  test('loads and normalizes the real provider adapter', async () => {
-    const { client } = makeClient({
-      providers: [{ id: 'openai', models: { sol: { family: 'gpt', cost: { input: 1 } } } }],
-    });
-    const hooks = await server({ client } as PluginInput);
+  test('does not call back into OpenCode while the instance is bootstrapping', async () => {
+    const fixture = makeClient({ providersNeverResolve: true });
+    const initializing = createServer({ apiKey: () => Effect.succeed(Option.none()) })({
+      client: fixture.client,
+    } as PluginInput);
+
+    await Promise.resolve();
+    expect(fixture.providerCalls).toBe(0);
+
+    const hooks = await initializing;
     expect(hooks['chat.message']).toBeFunction();
   });
 
+  test('loads and normalizes the real provider adapter on demand', async () => {
+    const fixture = makeClient({
+      child: { id: 'child', parentID: 'parent' },
+      parent: { id: 'parent' },
+      messages: parentMessages(),
+      providers: [
+        {
+          id: 'openai',
+          models: { sol: { family: 'gpt', cost: { input: 1 }, variants: { low: {}, high: {} } } },
+        },
+      ],
+    });
+    const plugin = createServer({ apiKey: () => Effect.succeed(Option.none()) });
+    const hooks = await plugin({ client: fixture.client } as PluginInput);
+    expect(hooks['chat.message']).toBeFunction();
+    expect(fixture.providerCalls).toBe(0);
+
+    await hooks['chat.message']!(input(), output());
+    expect(fixture.providerCalls).toBe(1);
+    expect(fixture.logs.at(-1)?.message).toBe('missing_openrouter_api_key');
+  });
+
+  test('runs the exported server with its default credential adapter', async () => {
+    const fixture = makeClient({
+      child: { id: 'child', parentID: 'parent' },
+      parent: { id: 'parent' },
+      messages: parentMessages(),
+      providers: [
+        {
+          id: 'openai',
+          models: { sol: { family: 'gpt', cost: { input: 1 }, variants: { low: {}, high: {} } } },
+        },
+      ],
+    });
+    const previousKey = process.env.OPENROUTER_API_KEY;
+    const previousDataHome = process.env.XDG_DATA_HOME;
+    process.env.OPENROUTER_API_KEY = '';
+    process.env.XDG_DATA_HOME = '/missing-jev-router-test-data';
+    try {
+      const hooks = await server({ client: fixture.client } as PluginInput);
+      await hooks['chat.message']!(input(), output());
+      expect(fixture.logs.at(-1)?.message).toBe('missing_openrouter_api_key');
+    } finally {
+      if (previousKey === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = previousKey;
+      if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousDataHome;
+    }
+  });
+
   test('fails open when catalog loading and logging fail', async () => {
-    const fixture = makeClient({ logFails: true });
+    let catalogCalls = 0;
+    const fixture = makeClient({
+      child: { id: 'child', parentID: 'parent' },
+      parent: { id: 'parent' },
+      messages: parentMessages(),
+      logFails: true,
+    });
     const plugin = createServer({
-      apiKey: () => undefined,
-      loadCatalog: async () => {
-        throw new Error('catalog unavailable');
-      },
+      apiKey: () => Effect.succeed(Option.none()),
+      loadCatalog: () =>
+        Effect.suspend(() => {
+          catalogCalls += 1;
+          return Effect.fail(openCodeError('config.providers', new Error('catalog unavailable')));
+        }),
     });
     const hooks = await plugin({ client: fixture.client } as PluginInput);
     expect(hooks['chat.message']).toBeFunction();
-    expect(fixture.logs.at(-1)?.message).toBe('catalog_load_failed');
+    await hooks['chat.message']!(input(), output());
+    await hooks['chat.message']!(input(), output());
+    expect(catalogCalls).toBe(1);
+    expect(fixture.logs.some((entry) => entry.message === 'catalog_load_failed')).toBeTrue();
+  });
+
+  test('shares one lazy catalog load across concurrent messages', async () => {
+    let catalogCalls = 0;
+    const fixture = makeClient({
+      child: { id: 'child', parentID: 'parent' },
+      parent: { id: 'parent' },
+      messages: parentMessages(),
+    });
+    const plugin = createServer({
+      apiKey: () => Effect.succeed(Option.none()),
+      loadCatalog: () =>
+        Effect.sync(() => {
+          catalogCalls += 1;
+          return variantCatalog();
+        }),
+    });
+    const hooks = await plugin({ client: fixture.client } as PluginInput);
+
+    await Promise.all([hooks['chat.message']!(input(), output()), hooks['chat.message']!(input(), output())]);
+    expect(catalogCalls).toBe(1);
+  });
+
+  test('fails open when lazy catalog loading stalls', async () => {
+    const fixture = makeClient({
+      child: { id: 'child', parentID: 'parent' },
+      parent: { id: 'parent' },
+      messages: parentMessages(),
+      providersNeverResolve: true,
+    });
+    const hooks = await createServer({ apiKey: () => Effect.succeed(Option.none()) })(
+      { client: fixture.client } as PluginInput,
+      {
+        timeoutMs: 10,
+      },
+    );
+
+    await hooks['chat.message']!(input(), output());
+    expect(fixture.logs.some((entry) => entry.message === 'catalog_load_failed')).toBeTrue();
+  });
+
+  test('maps a rejected provider request through the default catalog adapter', async () => {
+    const fixture = makeClient({
+      child: { id: 'child', parentID: 'parent' },
+      parent: { id: 'parent' },
+      messages: parentMessages(),
+      providersFail: true,
+    });
+    const hooks = await createServer({ apiKey: () => Effect.succeed(Option.none()) })({
+      client: fixture.client,
+    } as PluginInput);
+
+    await hooks['chat.message']!(input(), output());
+    expect(fixture.logs.some((entry) => entry.message === 'catalog_load_failed')).toBeTrue();
   });
 });
 
@@ -225,11 +364,11 @@ describe('chat.message routing', () => {
       messages: parentMessages(),
     });
     const plugin = createServer({
-      apiKey: () => 'key',
-      loadCatalog: async () => variantCatalog(),
-      ask: async (request) => {
+      apiKey: () => Effect.succeed(Option.some('key')),
+      loadCatalog: () => Effect.succeed(variantCatalog()),
+      ask: (request) => {
         received = request;
-        return cheapAnswers;
+        return Effect.succeed(cheapAnswers);
       },
     });
     const hooks = await plugin({ client: fixture.client } as PluginInput, { timeoutMs: 321, confidenceMin: 0.75 });

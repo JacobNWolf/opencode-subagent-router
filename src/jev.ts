@@ -1,7 +1,10 @@
-import * as z from 'zod';
+import { Effect, Schema } from 'effect';
+
+import { withOperationTimeout, type OperationTimeoutError } from './errors';
 
 const JEV_URL = 'https://openrouter.ai/api/alpha/decisions';
 const JEV_MODEL = 'typesafe/jev-1.13';
+const KIND_CHOICES = ['search', 'mechanical', 'review', 'implementation', 'architecture', 'diagnosis'] as const;
 
 export const QUESTIONS = {
   kind: {
@@ -35,71 +38,101 @@ export const QUESTIONS = {
   },
 };
 
-const probability = z.number().min(0).max(1);
-const kindChoices = Object.keys(QUESTIONS.kind.criteria) as [
-  keyof typeof QUESTIONS.kind.criteria,
-  ...(keyof typeof QUESTIONS.kind.criteria)[],
-];
-
-const JevAnswersSchema = z.object({
-  kind: z.object({
-    type: z.literal('choice'),
-    choice: z.enum(kindChoices),
-    confidence: probability,
+const Probability = Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 1 }));
+const JevAnswersSchema = Schema.Struct({
+  kind: Schema.Struct({
+    type: Schema.Literal('choice'),
+    choice: Schema.Literals(KIND_CHOICES),
+    confidence: Probability,
   }),
-  reasoning: z.object({
-    type: z.literal('score'),
-    score: z
-      .number()
-      .min(0)
-      .max(QUESTIONS.reasoning.criteria.length - 1),
-    confidence: probability,
+  reasoning: Schema.Struct({
+    type: Schema.Literal('score'),
+    score: Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: QUESTIONS.reasoning.criteria.length - 1 })),
+    confidence: Probability,
   }),
-  keep_parent: z.object({
-    type: z.literal('noul'),
-    noul: probability,
+  keep_parent: Schema.Struct({
+    type: Schema.Literal('noul'),
+    noul: Probability,
   }),
 });
+const JevResponseSchema = Schema.fromJsonString(Schema.Struct({ answers: JevAnswersSchema }));
 
-export type JevAnswers = z.infer<typeof JevAnswersSchema>;
+export type JevAnswers = typeof JevAnswersSchema.Type;
+
+export type JevTransportError = {
+  readonly _tag: 'JevTransportError';
+  readonly operation: 'request' | 'response_body';
+  readonly cause: unknown;
+};
+
+export type JevHttpError = {
+  readonly _tag: 'JevHttpError';
+  readonly status: number;
+  readonly body: string;
+};
+
+export type JevResponseError = {
+  readonly _tag: 'JevResponseError';
+  readonly cause: unknown;
+};
+
+export const jevTransportError = (operation: JevTransportError['operation'], cause: unknown): JevTransportError => ({
+  _tag: 'JevTransportError',
+  operation,
+  cause,
+});
+
+const jevHttpError = (status: number, body: string): JevHttpError => ({ _tag: 'JevHttpError', status, body });
+
+const jevResponseError = (cause: unknown): JevResponseError => ({ _tag: 'JevResponseError', cause });
+
+export type JevError = JevTransportError | JevHttpError | JevResponseError | OperationTimeoutError;
 
 type Fetcher = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-export async function askJev(
+export function askJev(
   input: {
-    apiKey: string;
-    state: { subagent_type?: string; description?: string; prompt: string };
-    timeoutMs: number;
+    readonly apiKey: string;
+    readonly state: { readonly subagent_type?: string; readonly description?: string; readonly prompt: string };
+    readonly timeoutMs: number;
   },
   fetcher: Fetcher = fetch,
-): Promise<JevAnswers> {
-  const res = await fetcher(JEV_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${input.apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: JEV_MODEL,
-      state: {
-        subagent_type: input.state.subagent_type ?? '',
-        description: input.state.description ?? '',
-        prompt: input.state.prompt.slice(0, 2000),
-      },
-      questions: QUESTIONS,
-    }),
-    signal: AbortSignal.timeout(input.timeoutMs),
+): Effect.Effect<JevAnswers, JevError> {
+  const request = Effect.gen(function* () {
+    const response = yield* Effect.tryPromise({
+      try: (signal) =>
+        fetcher(JEV_URL, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${input.apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: JEV_MODEL,
+            state: {
+              subagent_type: input.state.subagent_type ?? '',
+              description: input.state.description ?? '',
+              prompt: input.state.prompt.slice(0, 2000),
+            },
+            questions: QUESTIONS,
+          }),
+          signal,
+        }),
+      catch: (cause) => jevTransportError('request', cause),
+    });
+
+    const body = yield* Effect.tryPromise({
+      try: () => response.text(),
+      catch: (cause) => jevTransportError('response_body', cause),
+    });
+
+    if (!response.ok) {
+      return yield* Effect.fail(jevHttpError(response.status, body));
+    }
+
+    const parsed = yield* Schema.decodeUnknownEffect(JevResponseSchema)(body).pipe(Effect.mapError(jevResponseError));
+    return parsed.answers;
   });
 
-  if (!res.ok) throw new Error(`Jev ${res.status}: ${await res.text()}`);
-
-  const body: unknown = await res.json();
-  const answers = body && typeof body === 'object' ? (body as Record<string, unknown>).answers : undefined;
-  const parsed = JevAnswersSchema.safeParse(answers);
-
-  if (!parsed.success) {
-    throw new TypeError('Jev returned malformed answers');
-  }
-
-  return parsed.data;
+  return withOperationTimeout(request, 'jev_request', input.timeoutMs);
 }

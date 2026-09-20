@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
+import { Effect } from 'effect';
+
 import { askJev, QUESTIONS, type JevAnswers } from '../src/jev';
 
 const result: JevAnswers = {
@@ -17,17 +19,22 @@ describe('askJev', () => {
   test('sends a bounded Decisions API request and returns answers', async () => {
     let request: { url?: string; init?: RequestInit } = {};
     const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
-      request = { url: url instanceof Request ? url.url : url.toString(), init };
+      request = {
+        url: url instanceof Request ? url.url : url.toString(),
+        ...(init === undefined ? {} : { init }),
+      };
       return Response.json({ answers: result });
     };
 
-    const answers = await askJev(
-      {
-        apiKey: 'secret',
-        state: { subagent_type: 'general', description: 'format', prompt: 'x'.repeat(2100) },
-        timeoutMs: 1234,
-      },
-      fetcher,
+    const answers = await Effect.runPromise(
+      askJev(
+        {
+          apiKey: 'secret',
+          state: { subagent_type: 'general', description: 'format', prompt: 'x'.repeat(2100) },
+          timeoutMs: 1234,
+        },
+        fetcher,
+      ),
     );
     expect(answers).toEqual(result);
 
@@ -56,22 +63,62 @@ describe('askJev', () => {
       return Response.json({ answers: result });
     };
 
-    await askJev({ apiKey: 'key', state: { prompt: 'prompt' }, timeoutMs: 10 }, fetcher);
+    await Effect.runPromise(askJev({ apiKey: 'key', state: { prompt: 'prompt' }, timeoutMs: 10 }, fetcher));
   });
 
-  test('includes the response body in HTTP errors', async () => {
-    const fetcher = async () => new Response('rate limited', { status: 429 });
-    let error: unknown;
+  test('uses the global fetch adapter by default', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => Response.json({ answers: result })) as unknown as typeof fetch;
     try {
-      await askJev({ apiKey: 'key', state: { prompt: 'prompt' }, timeoutMs: 10 }, fetcher);
-    } catch (caught) {
-      error = caught;
+      const answers = await Effect.runPromise(askJev({ apiKey: 'key', state: { prompt: 'prompt' }, timeoutMs: 100 }));
+      expect(answers).toEqual(result);
+    } finally {
+      globalThis.fetch = originalFetch;
     }
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toBe('Jev 429: rate limited');
   });
 
-  test('rejects malformed successful responses', async () => {
+  test('returns tagged request and response-body transport failures', async () => {
+    const requestError = await Effect.runPromise(
+      Effect.flip(
+        askJev({ apiKey: 'key', state: { prompt: 'prompt' }, timeoutMs: 100 }, async () => {
+          throw new Error('offline');
+        }),
+      ),
+    );
+    expect(requestError).toMatchObject({ _tag: 'JevTransportError', operation: 'request' });
+
+    const responseError = await Effect.runPromise(
+      Effect.flip(
+        askJev(
+          { apiKey: 'key', state: { prompt: 'prompt' }, timeoutMs: 100 },
+          async () =>
+            ({ ok: true, text: async () => Promise.reject(new Error('body unavailable')) }) as unknown as Response,
+        ),
+      ),
+    );
+    expect(responseError).toMatchObject({ _tag: 'JevTransportError', operation: 'response_body' });
+  });
+
+  test('includes the response body in tagged HTTP errors', async () => {
+    const error = await Effect.runPromise(
+      Effect.flip(
+        askJev(
+          { apiKey: 'key', state: { prompt: 'prompt' }, timeoutMs: 100 },
+          async () => new Response('rate limited', { status: 429 }),
+        ),
+      ),
+    );
+    expect(error).toMatchObject({ status: 429, body: 'rate limited' });
+  });
+
+  test('rejects invalid JSON and malformed successful responses', async () => {
+    const invalidJson = await Effect.runPromise(
+      Effect.flip(
+        askJev({ apiKey: 'key', state: { prompt: 'prompt' }, timeoutMs: 100 }, async () => new Response('{')),
+      ),
+    );
+    expect(invalidJson._tag).toBe('JevResponseError');
+
     const malformed = [
       {},
       { ...result, kind: { ...result.kind, choice: 'invalid' } },
@@ -82,15 +129,28 @@ describe('askJev', () => {
     ];
 
     for (const answers of malformed) {
-      const fetcher = async () => Response.json({ answers });
-      let error: unknown;
-      try {
-        await askJev({ apiKey: 'key', state: { prompt: 'prompt' }, timeoutMs: 10 }, fetcher);
-      } catch (caught) {
-        error = caught;
-      }
-      expect(error).toBeInstanceOf(TypeError);
-      expect((error as Error).message).toBe('Jev returned malformed answers');
+      const error = await Effect.runPromise(
+        Effect.flip(
+          askJev({ apiKey: 'key', state: { prompt: 'prompt' }, timeoutMs: 100 }, async () =>
+            Response.json({ answers }),
+          ),
+        ),
+      );
+      expect(error._tag).toBe('JevResponseError');
     }
+  });
+
+  test('times out and aborts a stalled request', async () => {
+    let signal: AbortSignal | undefined;
+    const error = await Effect.runPromise(
+      Effect.flip(
+        askJev({ apiKey: 'key', state: { prompt: 'prompt' }, timeoutMs: 10 }, async (_url, init) => {
+          signal = init?.signal ?? undefined;
+          return await new Promise<Response>(() => {});
+        }),
+      ),
+    );
+    expect(error._tag).toBe('OperationTimeoutError');
+    expect(signal?.aborted).toBeTrue();
   });
 });

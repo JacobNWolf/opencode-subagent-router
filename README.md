@@ -73,5 +73,6 @@ bun install
 bun run fmt:check
 bun run lint
 bun run lint:ts
+bun run typecheck
 bun run test:coverage
 ```

@@ -1,8 +1,10 @@
 import type { JevAnswers } from './jev';
 
-export type Verdict = { action: 'downgrade' | 'keep'; reason: string };
+export type Verdict =
+  | { readonly action: 'keep'; readonly reason: 'low_confidence' | 'keep_parent_noul' | 'hard_task' }
+  | { readonly action: 'downgrade'; readonly reason: 'cheap_task' };
 
-const HARD_KIND = new Set(['architecture', 'diagnosis']);
+const HARD_KINDS: ReadonlySet<JevAnswers['kind']['choice']> = new Set(['architecture', 'diagnosis']);
 
 export function decide(answers: JevAnswers, confidenceMin = 0.5): Verdict {
   if (answers.kind.confidence < confidenceMin || answers.reasoning.confidence < confidenceMin) {
@@ -13,7 +15,7 @@ export function decide(answers: JevAnswers, confidenceMin = 0.5): Verdict {
     return { action: 'keep', reason: 'keep_parent_noul' };
   }
 
-  if (HARD_KIND.has(answers.kind.choice) || answers.reasoning.score >= 1.5) {
+  if (HARD_KINDS.has(answers.kind.choice) || answers.reasoning.score >= 1.5) {
     return { action: 'keep', reason: 'hard_task' };
   }
 

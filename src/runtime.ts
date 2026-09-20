@@ -2,94 +2,112 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import * as z from 'zod';
+import { Effect, Option, Schema } from 'effect';
+import { flatMap, isNotNil, isUndefined, omitBy } from 'es-toolkit';
 
 import type { CatalogModel, ModelRef, Route } from './resolve-fast';
 
 export type RouterOptions = {
-  timeoutMs: number;
-  confidenceMin: number;
-  routes: Route[];
+  readonly timeoutMs: number;
+  readonly confidenceMin: number;
+  readonly routes: readonly Route[];
 };
 
 type SourceModel = {
-  id?: string;
-  family?: string;
-  tool_call?: boolean;
-  status?: string;
-  cost?: { input?: number };
-  variants?: Record<string, unknown>;
-  capabilities?: { toolcall?: boolean };
+  readonly id?: string;
+  readonly family?: string;
+  readonly tool_call?: boolean;
+  readonly status?: string;
+  readonly cost?: { readonly input?: number };
+  readonly variants?: Readonly<Record<string, unknown>>;
+  readonly capabilities?: { readonly toolcall?: boolean };
 };
 
 type SourceProvider = {
-  id: string;
-  models: Record<string, SourceModel>;
+  readonly id: string;
+  readonly models: Readonly<Record<string, SourceModel>>;
 };
 
 type MessageSnapshot = {
-  info: {
-    role: string;
-    providerID?: string;
-    modelID?: string;
-    variant?: string;
-    time?: { created?: number };
+  readonly info: {
+    readonly role: string;
+    readonly providerID?: string;
+    readonly modelID?: string;
+    readonly variant?: string;
+    readonly time?: { readonly created?: number };
   };
 };
 
-const RouteSchema: z.ZodType<Route> = z.object({
-  parent: z.object({
-    model: z.string(),
-    variant: z.union([z.string(), z.array(z.string())]).optional(),
+const RouteSchema = Schema.Struct({
+  parent: Schema.Struct({
+    model: Schema.String,
+    variant: Schema.optionalKey(Schema.Union([Schema.String, Schema.Array(Schema.String)])),
   }),
-  fast: z.object({
-    model: z.string(),
-    variant: z.string().optional(),
+  fast: Schema.Struct({
+    model: Schema.String,
+    variant: Schema.optionalKey(Schema.String),
   }),
 });
-const positiveNumber = z.number().positive();
-const probability = z.number().min(0).max(1);
-const AuthFileSchema = z.object({
-  openrouter: z.object({ key: z.string().optional() }).optional(),
-});
+const PositiveNumber = Schema.Finite.check(Schema.isGreaterThan(0));
+const Probability = Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 1 }));
+const AuthFileSchema = Schema.fromJsonString(
+  Schema.Struct({
+    openrouter: Schema.optionalKey(
+      Schema.Struct({
+        key: Schema.optionalKey(Schema.String),
+      }),
+    ),
+  }),
+);
 
-export function parseOptions(options?: Record<string, unknown>): RouterOptions {
-  const timeoutMs = positiveNumber.safeParse(options?.timeoutMs);
-  const confidenceMin = probability.safeParse(options?.confidenceMin);
+const decodeTimeout = Schema.decodeUnknownOption(PositiveNumber);
+const decodeConfidence = Schema.decodeUnknownOption(Probability);
+const decodeRoute = Schema.decodeUnknownOption(RouteSchema);
+
+type UndefinedKey<T> = {
+  [K in keyof T]-?: undefined extends T[K] ? K : never;
+}[keyof T];
+
+type CompactUndefined<T> = Omit<T, UndefinedKey<T>> &
+  Partial<{
+    [K in UndefinedKey<T>]: Exclude<T[K], undefined>;
+  }>;
+
+function compactUndefined<T extends Record<PropertyKey, unknown>>(value: T): CompactUndefined<T> {
+  return omitBy(value, isUndefined) as CompactUndefined<T>;
+}
+
+export function parseOptions(options?: Readonly<Record<string, unknown>>): RouterOptions {
+  const routes = Array.isArray(options?.routes)
+    ? options.routes.map((route) => Option.getOrUndefined(decodeRoute(route))).filter(isNotNil)
+    : [];
 
   return {
-    timeoutMs: timeoutMs.success ? timeoutMs.data : 2000,
-    confidenceMin: confidenceMin.success ? confidenceMin.data : 0.5,
-    routes: Array.isArray(options?.routes)
-      ? options.routes.flatMap((route) => {
-          const parsed = RouteSchema.safeParse(route);
-          return parsed.success ? [parsed.data] : [];
-        })
-      : [],
+    timeoutMs: Option.getOrElse(decodeTimeout(options?.timeoutMs), () => 2000),
+    confidenceMin: Option.getOrElse(decodeConfidence(options?.confidenceMin), () => 0.5),
+    routes,
   };
 }
 
 export function catalogFromProviders(value: readonly SourceProvider[] | undefined): CatalogModel[] {
-  const catalog: CatalogModel[] = [];
-  for (const provider of value ?? []) {
-    for (const [key, rawModel] of Object.entries(provider.models)) {
-      catalog.push({
+  return flatMap(value ?? [], (provider) =>
+    Object.entries(provider.models).map(([key, rawModel]) => {
+      const toolCall = rawModel.tool_call ?? rawModel.capabilities?.toolcall;
+      return compactUndefined({
         providerID: provider.id,
         id: rawModel.id ?? key,
         family: rawModel.family,
-        tool_call: rawModel.tool_call ?? rawModel.capabilities?.toolcall,
+        tool_call: toolCall,
         status: rawModel.status,
         cost: rawModel.cost?.input === undefined ? undefined : { input: rawModel.cost.input },
         variants: rawModel.variants,
-      });
-    }
-  }
-
-  return catalog;
+      }) satisfies CatalogModel;
+    }),
+  );
 }
 
 export function latestAssistantModel(value: readonly MessageSnapshot[] | undefined): ModelRef | undefined {
-  let latest: { created: number; model: ModelRef } | undefined;
+  let latest: { readonly created: number; readonly model: ModelRef } | undefined;
   for (const entry of value ?? []) {
     const info = entry.info;
     if (info.role !== 'assistant' || !info.providerID || !info.modelID) continue;
@@ -98,11 +116,11 @@ export function latestAssistantModel(value: readonly MessageSnapshot[] | undefin
     if (!latest || created >= latest.created) {
       latest = {
         created,
-        model: {
+        model: compactUndefined({
           providerID: info.providerID,
           modelID: info.modelID,
           variant: info.variant,
-        },
+        }) satisfies ModelRef,
       };
     }
   }
@@ -110,30 +128,49 @@ export function latestAssistantModel(value: readonly MessageSnapshot[] | undefin
   return latest?.model;
 }
 
+export type CredentialError = {
+  readonly _tag: 'CredentialError';
+  readonly path: string;
+  readonly cause: unknown;
+};
+
+const credentialError = (path: string, cause: unknown): CredentialError => ({
+  _tag: 'CredentialError',
+  path,
+  cause,
+});
+
 const readTextFile = (path: string) => readFileSync(path, 'utf8');
 
+function nonEmptyString(value: string | undefined): Option.Option<string> {
+  const trimmed = value?.trim();
+  return trimmed ? Option.some(trimmed) : Option.none();
+}
+
 export function readOpenCodeOpenRouterKey(
-  env: Record<string, string | undefined> = process.env,
+  env: Readonly<Record<string, string | undefined>> = process.env,
   readText: (path: string) => string = readTextFile,
-): string | undefined {
+): Effect.Effect<Option.Option<string>, CredentialError> {
   const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
+  const path = join(dataHome, 'opencode', 'auth.json');
 
-  try {
-    const auth = AuthFileSchema.safeParse(JSON.parse(readText(join(dataHome, 'opencode', 'auth.json'))));
-    if (!auth.success) return;
-    const key = auth.data.openrouter?.key;
-
-    const trimmed = key?.trim();
-    if (trimmed) return trimmed;
-  } catch {
-    return;
-  }
+  return Effect.try({
+    try: () => readText(path),
+    catch: (cause) => credentialError(path, cause),
+  }).pipe(
+    Effect.flatMap((text) =>
+      Schema.decodeUnknownEffect(AuthFileSchema)(text).pipe(Effect.mapError((cause) => credentialError(path, cause))),
+    ),
+    Effect.map((auth) => nonEmptyString(auth.openrouter?.key)),
+  );
 }
 
 export function getOpenRouterApiKey(
-  env: Record<string, string | undefined> = process.env,
+  env: Readonly<Record<string, string | undefined>> = process.env,
   readText: (path: string) => string = readTextFile,
-): string | undefined {
-  const key = env.OPENROUTER_API_KEY?.trim();
-  return key || readOpenCodeOpenRouterKey(env, readText);
+): Effect.Effect<Option.Option<string>> {
+  const direct = nonEmptyString(env.OPENROUTER_API_KEY);
+  if (Option.isSome(direct)) return Effect.succeed(direct);
+
+  return readOpenCodeOpenRouterKey(env, readText).pipe(Effect.catch(() => Effect.succeed(Option.none())));
 }

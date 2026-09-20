@@ -1,22 +1,25 @@
 import type { Plugin, PluginInput, PluginOptions } from '@opencode-ai/plugin';
+import { Cause, Effect, Option } from 'effect';
 
 import { decide } from './decide';
+import { openCodeError, withOperationTimeout, type OpenCodeError } from './errors';
 import { askJev } from './jev';
 import { resolveFast, type CatalogModel, type ModelRef } from './resolve-fast';
 import { catalogFromProviders, getOpenRouterApiKey, latestAssistantModel, parseOptions } from './runtime';
 
 const SERVICE = 'jev-router';
 
-type Dependencies = {
-  ask: typeof askJev;
-  apiKey: () => string | undefined;
-  loadCatalog: (client: PluginInput['client']) => Promise<CatalogModel[]>;
+export type RouterDependencies = {
+  readonly ask: typeof askJev;
+  readonly apiKey: () => Effect.Effect<Option.Option<string>>;
+  readonly loadCatalog: (client: PluginInput['client']) => Effect.Effect<readonly CatalogModel[], OpenCodeError>;
 };
 
-const loadCatalog = async (client: PluginInput['client']): Promise<CatalogModel[]> => {
-  const response = await client.config.providers();
-  return catalogFromProviders(response.data?.providers);
-};
+const loadCatalog: RouterDependencies['loadCatalog'] = (client) =>
+  Effect.tryPromise({
+    try: () => client.config.providers(),
+    catch: (cause) => openCodeError('config.providers', cause),
+  }).pipe(Effect.map((response) => catalogFromProviders(response.data?.providers)));
 
 function sameModel(left: ModelRef, right: ModelRef): boolean {
   return (
@@ -26,75 +29,101 @@ function sameModel(left: ModelRef, right: ModelRef): boolean {
   );
 }
 
-export function createServer(overrides: Partial<Dependencies> = {}): Plugin {
-  const dependencies: Dependencies = {
+export function createServer(overrides: Partial<RouterDependencies> = {}): Plugin {
+  const dependencies: RouterDependencies = {
     ask: overrides.ask ?? askJev,
     apiKey: overrides.apiKey ?? getOpenRouterApiKey,
     loadCatalog: overrides.loadCatalog ?? loadCatalog,
   };
 
-  return async ({ client }, rawOptions?: PluginOptions) => {
+  return ({ client }, rawOptions?: PluginOptions) => {
     const options = parseOptions(rawOptions);
-    const log = async (
+    const log = (
       level: 'debug' | 'info' | 'warn' | 'error',
       message: string,
-      extra?: Record<string, unknown>,
-    ) => {
-      try {
-        await client.app.log({ body: { service: SERVICE, level, message, extra } });
-      } catch {
-        // Routing must never fail because diagnostic logging is unavailable.
-      }
-    };
+      extra?: Readonly<Record<string, unknown>>,
+    ): Effect.Effect<void> =>
+      Effect.tryPromise({
+        try: () =>
+          client.app.log({
+            body: {
+              service: SERVICE,
+              level,
+              message,
+              ...(extra === undefined ? {} : { extra }),
+            },
+          }),
+        catch: (cause) => openCodeError('app.log', cause),
+      }).pipe(Effect.asVoid, Effect.ignoreCause);
 
-    let catalog: CatalogModel[] = [];
-    try {
-      catalog = await dependencies.loadCatalog(client);
-    } catch (error) {
-      await log('warn', 'catalog_load_failed', { error: String(error) });
-    }
-    const apiKey = dependencies.apiKey();
+    const catalogLoad = withOperationTimeout(dependencies.loadCatalog(client), 'catalog_load', options.timeoutMs).pipe(
+      Effect.catchCause((cause) =>
+        log('warn', 'catalog_load_failed', { error: Cause.pretty(cause) }).pipe(
+          Effect.map((): readonly CatalogModel[] => []),
+        ),
+      ),
+    );
+    const getCatalog = Effect.runSync(Effect.cached(catalogLoad));
+    const getApiKey = Effect.runSync(Effect.cached(dependencies.apiKey()));
 
-    return {
-      'chat.message': async (input, output) => {
-        try {
-          const child = (await client.session.get({ path: { id: output.message.sessionID } })).data;
+    const openCodeRequest = <A>(operation: string, request: () => Promise<A>): Effect.Effect<A, OpenCodeError> =>
+      Effect.tryPromise({
+        try: request,
+        catch: (cause) => openCodeError(operation, cause),
+      });
+
+    return Promise.resolve({
+      'chat.message': (input, output) => {
+        const route = Effect.gen(function* () {
+          const childResponse = yield* openCodeRequest('session.get.child', () =>
+            client.session.get({ path: { id: output.message.sessionID } }),
+          );
+          const child = childResponse.data;
           if (!child?.parentID) {
-            await log('debug', 'not_child_session');
+            yield* log('debug', 'not_child_session');
             return;
           }
+          const parentID = child.parentID;
 
-          const parent = (await client.session.get({ path: { id: child.parentID } })).data;
+          const parentResponse = yield* openCodeRequest('session.get.parent', () =>
+            client.session.get({ path: { id: parentID } }),
+          );
+          const parent = parentResponse.data;
           if (!parent || parent.parentID) {
-            await log('debug', 'not_primary_child');
+            yield* log('debug', 'not_primary_child');
             return;
           }
 
-          const messages = (await client.session.messages({ path: { id: parent.id } })).data;
-          const parentModel = latestAssistantModel(messages);
+          const messagesResponse = yield* openCodeRequest('session.messages', () =>
+            client.session.messages({ path: { id: parent.id } }),
+          );
+          const parentModel = latestAssistantModel(messagesResponse.data);
           if (!parentModel) {
-            await log('warn', 'parent_model_unavailable');
+            yield* log('warn', 'parent_model_unavailable');
             return;
           }
 
           const model = output.message.model as typeof output.message.model & { variant?: string };
+          const variant = model.variant ?? input.variant;
           const incoming: ModelRef = {
             providerID: model.providerID,
             modelID: model.modelID,
-            variant: model.variant ?? input.variant,
+            ...(variant === undefined ? {} : { variant }),
           };
           if (!sameModel(incoming, parentModel)) {
-            await log('info', 'pinned_model', { incoming, parent: parentModel });
+            yield* log('info', 'pinned_model', { incoming, parent: parentModel });
             return;
           }
 
-          const fast = resolveFast(parentModel, catalog, options.routes);
+          const fast = resolveFast(parentModel, yield* getCatalog, options.routes);
           if (!fast) {
-            await log('debug', 'no_fast_target', { parent: parentModel });
+            yield* log('debug', 'no_fast_target', { parent: parentModel });
             return;
           }
-          if (!apiKey) {
-            await log('warn', 'missing_openrouter_api_key');
+
+          const apiKey = yield* getApiKey;
+          if (Option.isNone(apiKey)) {
+            yield* log('warn', 'missing_openrouter_api_key');
             return;
           }
 
@@ -102,38 +131,43 @@ export function createServer(overrides: Partial<Dependencies> = {}): Plugin {
             .filter((part) => part.type === 'text')
             .map((part) => part.text)
             .join('\n');
-          const answers = await dependencies.ask({
-            apiKey,
-            state: { subagent_type: input.agent, prompt },
+          const answers = yield* dependencies.ask({
+            apiKey: apiKey.value,
+            state: {
+              ...(input.agent === undefined ? {} : { subagent_type: input.agent }),
+              prompt,
+            },
             timeoutMs: options.timeoutMs,
           });
           const verdict = decide(answers, options.confidenceMin);
-          await log('info', verdict.reason, { answers, fast, parent: parentModel });
+          yield* log('info', verdict.reason, { answers, fast, parent: parentModel });
 
           if (verdict.action === 'keep') {
-            try {
-              await client.tui.showToast({
-                body: {
-                  title: 'Subagent kept parent model',
-                  message: `${input.agent ?? output.message.agent}: ${verdict.reason}`,
-                  variant: 'warning',
-                },
-              });
-            } catch {
-              // The TUI is optional (for example, when OpenCode runs headlessly).
-            }
+            yield* Effect.tryPromise({
+              try: () =>
+                client.tui.showToast({
+                  body: {
+                    title: 'Subagent kept parent model',
+                    message: `${input.agent ?? output.message.agent}: ${verdict.reason}`,
+                    variant: 'warning',
+                  },
+                }),
+              catch: (cause) => openCodeError('tui.showToast', cause),
+            }).pipe(Effect.asVoid, Effect.ignoreCause);
             return;
           }
 
-          model.providerID = fast.providerID;
-          model.modelID = fast.modelID;
-          if (fast.variant) model.variant = fast.variant;
-          else delete model.variant;
-        } catch (error) {
-          await log('warn', 'routing_failed', { error: String(error) });
-        }
+          yield* Effect.sync(() => {
+            model.providerID = fast.providerID;
+            model.modelID = fast.modelID;
+            if (fast.variant) model.variant = fast.variant;
+            else delete model.variant;
+          });
+        }).pipe(Effect.catchCause((cause) => log('warn', 'routing_failed', { error: Cause.pretty(cause) })));
+
+        return Effect.runPromise(route);
       },
-    };
+    });
   };
 }
 

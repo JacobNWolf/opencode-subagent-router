@@ -34,14 +34,16 @@
     "fmt:check": "oxfmt --check",
     "lint": "oxlint",
     "lint:ts": "oxlint --type-check",
+    "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:coverage": "bun test --coverage"
   },
   "dependencies": {
-    "zod": "^4.1.8"
+    "effect": "4.0.0-beta.83",
+    "es-toolkit": "^1.52.0"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "^1.18.31",
+    "@opencode-ai/plugin": "1.18.31",
     "@types/bun": "latest",
     "oxfmt": "^0.68.0",
     "oxlint": "^1.83.0",

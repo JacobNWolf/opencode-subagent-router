@@ -3,6 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { Effect, Option } from 'effect';
+
 import {
   catalogFromProviders,
   getOpenRouterApiKey,
@@ -15,6 +17,11 @@ describe('parseOptions', () => {
   test('uses defaults for absent or invalid values', () => {
     expect(parseOptions()).toEqual({ timeoutMs: 2000, confidenceMin: 0.5, routes: [] });
     expect(parseOptions({ timeoutMs: Number.NaN, confidenceMin: 2, routes: 'nope' })).toEqual({
+      timeoutMs: 2000,
+      confidenceMin: 0.5,
+      routes: [],
+    });
+    expect(parseOptions({ timeoutMs: 0, confidenceMin: Number.POSITIVE_INFINITY })).toEqual({
       timeoutMs: 2000,
       confidenceMin: 0.5,
       routes: [],
@@ -81,20 +88,11 @@ describe('catalogFromProviders', () => {
       {
         providerID: 'openai',
         id: 'luna',
-        family: undefined,
         tool_call: false,
-        status: undefined,
-        cost: undefined,
-        variants: undefined,
       },
       {
         providerID: 'openai',
         id: 'bare',
-        family: undefined,
-        tool_call: undefined,
-        status: undefined,
-        cost: undefined,
-        variants: undefined,
       },
     ]);
   });
@@ -115,43 +113,75 @@ describe('latestAssistantModel', () => {
 });
 
 describe('OpenRouter credentials', () => {
-  test('reads and trims the OpenCode auth key', () => {
+  test('reads and trims the OpenCode auth key', async () => {
     let path = '';
-    expect(
+    const key = await Effect.runPromise(
       readOpenCodeOpenRouterKey({ XDG_DATA_HOME: '/data' }, (requested) => {
         path = requested;
         return JSON.stringify({ openrouter: { key: '  auth-key  ' } });
       }),
-    ).toBe('auth-key');
+    );
+    expect(Option.getOrUndefined(key)).toBe('auth-key');
     expect(path).toBe('/data/opencode/auth.json');
   });
 
-  test('returns undefined for missing, malformed, or empty auth data', () => {
-    expect(readOpenCodeOpenRouterKey({}, () => '{')).toBeUndefined();
-    expect(readOpenCodeOpenRouterKey({}, () => 'null')).toBeUndefined();
-    expect(readOpenCodeOpenRouterKey({}, () => JSON.stringify({ openrouter: null }))).toBeUndefined();
-    expect(readOpenCodeOpenRouterKey({}, () => JSON.stringify({ openrouter: { key: 3 } }))).toBeUndefined();
-    expect(readOpenCodeOpenRouterKey({}, () => JSON.stringify({ openrouter: { key: ' ' } }))).toBeUndefined();
+  test('returns tagged failures for unreadable or malformed auth data', async () => {
+    const inputs = ['{', 'null', JSON.stringify({ openrouter: null }), JSON.stringify({ openrouter: { key: 3 } })];
+    for (const input of inputs) {
+      const error = await Effect.runPromise(Effect.flip(readOpenCodeOpenRouterKey({}, () => input)));
+      expect(error._tag).toBe('CredentialError');
+    }
+    const unreadable = await Effect.runPromise(
+      Effect.flip(
+        readOpenCodeOpenRouterKey({}, () => {
+          throw new Error('missing');
+        }),
+      ),
+    );
+    expect(unreadable._tag).toBe('CredentialError');
+
+    const empty = await Effect.runPromise(
+      readOpenCodeOpenRouterKey({}, () => JSON.stringify({ openrouter: { key: ' ' } })),
+    );
+    expect(Option.isNone(empty)).toBeTrue();
   });
 
-  test('prefers the environment and otherwise uses the auth file', () => {
-    expect(getOpenRouterApiKey({ OPENROUTER_API_KEY: ' direct ' }, () => 'not json')).toBe('direct');
-    expect(
+  test('prefers the environment and otherwise uses the auth file', async () => {
+    const direct = await Effect.runPromise(getOpenRouterApiKey({ OPENROUTER_API_KEY: ' direct ' }, () => 'not json'));
+    expect(Option.getOrUndefined(direct)).toBe('direct');
+
+    const stored = await Effect.runPromise(
       getOpenRouterApiKey({ OPENROUTER_API_KEY: ' ', XDG_DATA_HOME: '/data' }, () =>
         JSON.stringify({ openrouter: { key: 'stored' } }),
       ),
-    ).toBe('stored');
+    );
+    expect(Option.getOrUndefined(stored)).toBe('stored');
+
+    const missing = await Effect.runPromise(
+      getOpenRouterApiKey({}, () => {
+        throw new Error('missing');
+      }),
+    );
+    expect(Option.isNone(missing)).toBeTrue();
   });
 
-  test('uses the real file reader with XDG_DATA_HOME', () => {
+  test('uses the real file reader with XDG_DATA_HOME', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'jev-router-'));
     const authDirectory = join(directory, 'opencode');
     mkdirSync(authDirectory);
     writeFileSync(join(authDirectory, 'auth.json'), JSON.stringify({ openrouter: { key: 'file-key' } }));
     try {
-      expect(readOpenCodeOpenRouterKey({ XDG_DATA_HOME: directory })).toBe('file-key');
+      const key = await Effect.runPromise(readOpenCodeOpenRouterKey({ XDG_DATA_HOME: directory }));
+      expect(Option.getOrUndefined(key)).toBe('file-key');
     } finally {
       rmSync(directory, { recursive: true });
     }
+  });
+
+  test('provides safe defaults for the process environment and file reader', async () => {
+    const authExit = await Effect.runPromise(Effect.exit(readOpenCodeOpenRouterKey()));
+    const keyExit = await Effect.runPromise(Effect.exit(getOpenRouterApiKey()));
+    expect(authExit._tag === 'Success' || authExit._tag === 'Failure').toBeTrue();
+    expect(keyExit._tag).toBe('Success');
   });
 });

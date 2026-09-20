@@ -78,7 +78,11 @@ describe('resolveFast', () => {
 
   test('returns nothing without parent family metadata', () => {
     expect(resolveFast({ providerID: 'openai', modelID: 'unknown' }, [])).toBeUndefined();
-    expect(resolveFast({ providerID: 'openai', modelID: 'gpt-sol' }, [{ ...self, family: undefined }])).toBeUndefined();
+    expect(
+      resolveFast({ providerID: 'openai', modelID: 'gpt-sol' }, [
+        { providerID: 'openai', id: 'gpt-sol', cost: { input: 10 } },
+      ]),
+    ).toBeUndefined();
   });
 
   test('chooses the cheapest eligible same-family sibling', () => {
@@ -100,13 +104,26 @@ describe('resolveFast', () => {
   });
 
   test('handles missing costs and a sibling without variants', () => {
-    const expensiveWithoutCost = { ...self, cost: undefined, variants: undefined };
+    const expensiveWithoutCost: CatalogModel = {
+      providerID: 'openai',
+      id: 'gpt-sol',
+      family: 'gpt',
+      tool_call: true,
+    };
     const cheap = { providerID: 'openai', id: 'luna', family: 'gpt', cost: { input: 1 } };
     expect(resolveFast({ providerID: 'openai', modelID: 'gpt-sol' }, [expensiveWithoutCost, cheap])).toEqual({
       providerID: 'openai',
       modelID: 'luna',
-      variant: undefined,
     });
     expect(resolveFast({ providerID: 'openai', modelID: 'gpt-sol' }, [self])).toBeUndefined();
+  });
+
+  test('keeps catalog order when eligible siblings have equal costs', () => {
+    const first = { providerID: 'openai', id: 'first', family: 'gpt', cost: { input: 1 } };
+    const second = { providerID: 'openai', id: 'second', family: 'gpt', cost: { input: 1 } };
+    expect(resolveFast({ ...sol, variant: 'medium' }, [self, first, second])).toEqual({
+      providerID: 'openai',
+      modelID: 'first',
+    });
   });
 });
