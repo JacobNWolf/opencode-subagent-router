@@ -1,10 +1,20 @@
 {
   "name": "opencode-subagent-router",
-  "module": "index.ts",
-  "type": "module",
   "license": "MIT",
+  "type": "module",
+  "module": "index.ts",
+  "scripts": {
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check",
+    "lint": "oxlint",
+    "lint:ts": "oxlint --type-check"
+  },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "oxfmt": "^0.68.0",
+    "oxlint": "^1.83.0",
+    "oxlint-tsgolint": "^7.0.2002",
+    "typescript": "^7"
   },
   "peerDependencies": {
     "typescript": "^7"
