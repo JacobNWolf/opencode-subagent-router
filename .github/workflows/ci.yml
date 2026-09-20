@@ -40,3 +40,14 @@ jobs:
       - uses: jdx/mise-action@v4
       - run: bun install --frozen-lockfile
       - run: bun run lint:ts
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@v4
+      - run: bun install --frozen-lockfile
+      - run: bun run test:coverage
