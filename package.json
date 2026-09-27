@@ -39,6 +39,8 @@
     "test:coverage": "bun test --coverage"
   },
   "dependencies": {
+    "@opencode-ai/models": "^0.0.87",
+    "arkregex": "^0.0.10",
     "effect": "4.0.0-beta.83",
     "es-toolkit": "^1.52.0"
   },

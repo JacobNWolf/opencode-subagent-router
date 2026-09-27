@@ -56,7 +56,7 @@ describe('parseOptions', () => {
 });
 
 describe('catalogFromProviders', () => {
-  test('normalizes raw and resolved provider models', () => {
+  test('preserves selectable IDs, source IDs, and known metadata', () => {
     expect(catalogFromProviders(undefined)).toEqual([]);
     const result = catalogFromProviders([
       {
@@ -64,13 +64,24 @@ describe('catalogFromProviders', () => {
         models: {
           sol: {
             id: 'gpt-sol',
+            name: 'GPT Sol',
             family: 'gpt',
             tool_call: true,
+            attachment: true,
             status: 'active',
-            cost: { input: 10 },
+            cost: { input: 10, output: 20 },
+            limit: { context: 1000, output: 200 },
+            modalities: { input: ['text'], output: ['text'] },
             variants: { low: {} },
           },
-          luna: { capabilities: { toolcall: false } },
+          luna: { capabilities: { toolcall: false, attachment: false } },
+          rawWins: {
+            tool_call: true,
+            capabilities: { toolcall: false },
+          },
+          flagged: {
+            capabilities: { input: { text: true, image: false }, output: { text: true } },
+          },
           bare: {},
         },
       },
@@ -78,23 +89,88 @@ describe('catalogFromProviders', () => {
     expect(result).toEqual([
       {
         providerID: 'openai',
-        id: 'gpt-sol',
+        modelID: 'sol',
+        sourceID: 'gpt-sol',
+        name: 'GPT Sol',
         family: 'gpt',
-        tool_call: true,
         status: 'active',
-        cost: { input: 10 },
-        variants: { low: {} },
+        cost: { bands: [{ fromContext: 0, price: { input: 10, output: 20 } }] },
+        capabilities: {
+          attachment: true,
+          reasoning: false,
+          toolCall: true,
+          structuredOutput: false,
+          input: new Set(['text']),
+          output: new Set(['text']),
+        },
+        limits: { context: 1000, output: 200 },
+        variants: new Set(['low']),
       },
       {
         providerID: 'openai',
-        id: 'luna',
-        tool_call: false,
+        modelID: 'luna',
+        capabilities: {
+          attachment: false,
+          reasoning: false,
+          toolCall: false,
+          structuredOutput: false,
+          input: new Set(),
+          output: new Set(),
+        },
+        variants: new Set(),
       },
       {
         providerID: 'openai',
-        id: 'bare',
+        modelID: 'rawWins',
+        capabilities: {
+          attachment: false,
+          reasoning: false,
+          toolCall: true,
+          structuredOutput: false,
+          input: new Set(),
+          output: new Set(),
+        },
+        variants: new Set(),
+      },
+      {
+        providerID: 'openai',
+        modelID: 'flagged',
+        capabilities: {
+          attachment: false,
+          reasoning: false,
+          toolCall: false,
+          structuredOutput: false,
+          input: new Set(['text']),
+          output: new Set(['text']),
+        },
+        variants: new Set(),
+      },
+      {
+        providerID: 'openai',
+        modelID: 'bare',
+        variants: new Set(),
       },
     ]);
+  });
+
+  test('omits malformed optional metadata instead of inventing values', () => {
+    const [model] = catalogFromProviders([
+      {
+        id: 'openai',
+        models: {
+          broken: {
+            cost: { input: Number.NaN, output: 1 },
+            limit: { context: 1000 },
+            modalities: { input: ['text', 'nope'], output: ['text'] },
+          },
+        },
+      },
+    ]);
+    expect(model).toEqual({
+      providerID: 'openai',
+      modelID: 'broken',
+      variants: new Set(),
+    });
   });
 });
 

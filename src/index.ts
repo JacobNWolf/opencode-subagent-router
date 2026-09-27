@@ -4,7 +4,9 @@ import { Cause, Effect, Option } from 'effect';
 import { decide } from './decide';
 import { openCodeError, withOperationTimeout, type OpenCodeError } from './errors';
 import { askJev } from './jev';
-import { resolveFast, type CatalogModel, type ModelRef } from './resolve-fast';
+import { loadModelMetadata } from './models-dev';
+import { resolveFastDecision, type ModelRef } from './routing/resolve-fast';
+import type { EnabledModel } from './routing/types';
 import { catalogFromProviders, getOpenRouterApiKey, latestAssistantModel, parseOptions } from './runtime';
 
 const SERVICE = 'jev-router';
@@ -12,7 +14,8 @@ const SERVICE = 'jev-router';
 export type RouterDependencies = {
   readonly ask: typeof askJev;
   readonly apiKey: () => Effect.Effect<Option.Option<string>>;
-  readonly loadCatalog: (client: PluginInput['client']) => Effect.Effect<readonly CatalogModel[], OpenCodeError>;
+  readonly loadCatalog: (client: PluginInput['client']) => Effect.Effect<readonly EnabledModel[], OpenCodeError>;
+  readonly loadModelMetadata: typeof loadModelMetadata;
 };
 
 const loadCatalog: RouterDependencies['loadCatalog'] = (client) =>
@@ -34,6 +37,7 @@ export function createServer(overrides: Partial<RouterDependencies> = {}): Plugi
     ask: overrides.ask ?? askJev,
     apiKey: overrides.apiKey ?? getOpenRouterApiKey,
     loadCatalog: overrides.loadCatalog ?? loadCatalog,
+    loadModelMetadata: overrides.loadModelMetadata ?? loadModelMetadata,
   };
 
   return ({ client }, rawOptions?: PluginOptions) => {
@@ -59,11 +63,19 @@ export function createServer(overrides: Partial<RouterDependencies> = {}): Plugi
     const catalogLoad = withOperationTimeout(dependencies.loadCatalog(client), 'catalog_load', options.timeoutMs).pipe(
       Effect.catchCause((cause) =>
         log('warn', 'catalog_load_failed', { error: Cause.pretty(cause) }).pipe(
-          Effect.map((): readonly CatalogModel[] => []),
+          Effect.map((): readonly EnabledModel[] => []),
         ),
       ),
     );
     const getCatalog = Effect.runSync(Effect.cached(catalogLoad));
+    const metadataLoad = dependencies
+      .loadModelMetadata(options.timeoutMs)
+      .pipe(
+        Effect.catchCause((cause) =>
+          log('warn', 'model_metadata_load_failed', { error: Cause.pretty(cause) }).pipe(Effect.as(undefined)),
+        ),
+      );
+    const getModelMetadata = Effect.runSync(Effect.cached(metadataLoad));
     const getApiKey = Effect.runSync(Effect.cached(dependencies.apiKey()));
 
     const openCodeRequest = <A>(operation: string, request: () => Promise<A>): Effect.Effect<A, OpenCodeError> =>
@@ -115,9 +127,15 @@ export function createServer(overrides: Partial<RouterDependencies> = {}): Plugi
             return;
           }
 
-          const fast = resolveFast(parentModel, yield* getCatalog, options.routes);
+          const [catalog, modelsDev] = yield* Effect.all([getCatalog, getModelMetadata], { concurrency: 2 });
+          const resolution = resolveFastDecision(parentModel, catalog, {
+            routes: options.routes,
+            ...(modelsDev === undefined ? {} : { modelsDev }),
+          });
+
+          const fast = resolution.target;
           if (!fast) {
-            yield* log('debug', 'no_fast_target', { parent: parentModel });
+            yield* log('debug', 'no_fast_target', { parent: parentModel, reason: resolution.reason });
             return;
           }
 
@@ -139,8 +157,14 @@ export function createServer(overrides: Partial<RouterDependencies> = {}): Plugi
             },
             timeoutMs: options.timeoutMs,
           });
+
           const verdict = decide(answers, options.confidenceMin);
-          yield* log('info', verdict.reason, { answers, fast, parent: parentModel });
+          yield* log('info', verdict.reason, {
+            answers,
+            fast,
+            parent: parentModel,
+            routing: { reason: resolution.reason, ...resolution.details },
+          });
 
           if (verdict.action === 'keep') {
             yield* Effect.tryPromise({

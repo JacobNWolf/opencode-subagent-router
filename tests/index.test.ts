@@ -1,12 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 
+import type { Catalog } from '@opencode-ai/models/effect';
 import type { Plugin, PluginInput } from '@opencode-ai/plugin';
 import { Effect, Option } from 'effect';
 
 import { openCodeError } from '../src/errors';
 import { createServer, server } from '../src/index';
 import { jevTransportError, type JevAnswers } from '../src/jev';
-import type { CatalogModel } from '../src/resolve-fast';
+import type { EnabledModel } from '../src/routing/types';
 
 const cheapAnswers: JevAnswers = {
   kind: { type: 'choice', choice: 'search', confidence: 1 },
@@ -106,14 +107,17 @@ function parentMessages(modelID = 'sol', variant: string | undefined = 'high') {
   ];
 }
 
-function variantCatalog(): CatalogModel[] {
+const emptyMetadata = { providers: {}, models: {} } as Catalog;
+const unusedMetadata = () => Effect.succeed(emptyMetadata);
+
+function variantCatalog(): EnabledModel[] {
   return [
     {
       providerID: 'openai',
-      id: 'sol',
+      modelID: 'sol',
       family: 'gpt',
-      cost: { input: 10 },
-      variants: { low: {}, high: {} },
+      cost: { bands: [{ fromContext: 0, price: { input: 10, output: 10 } }] },
+      variants: new Set(['low', 'high']),
     },
   ];
 }
@@ -122,7 +126,9 @@ async function hooksFor(
   setup: ClientSetup,
   dependencies: {
     key?: string;
-    catalog?: CatalogModel[];
+    catalog?: EnabledModel[];
+    metadata?: Catalog;
+    metadataFails?: boolean;
     answers?: JevAnswers;
     askFails?: boolean;
   } = {},
@@ -131,6 +137,12 @@ async function hooksFor(
   const plugin = createServer({
     apiKey: () => Effect.succeed(Option.fromNullishOr(dependencies.key)),
     loadCatalog: () => Effect.succeed(dependencies.catalog ?? variantCatalog()),
+    loadModelMetadata: () => {
+      if (dependencies.metadataFails) {
+        return Effect.fail({ _tag: 'ModelMetadataLoadError', cause: new Error('metadata unavailable') });
+      }
+      return Effect.succeed(dependencies.metadata ?? emptyMetadata);
+    },
     ask: () => {
       if (dependencies.askFails) {
         return Effect.fail(jevTransportError('request', new Error('Jev unavailable')));
@@ -148,15 +160,23 @@ async function hooksFor(
 describe('plugin initialization', () => {
   test('does not call back into OpenCode while the instance is bootstrapping', async () => {
     const fixture = makeClient({ providersNeverResolve: true });
-    const initializing = createServer({ apiKey: () => Effect.succeed(Option.none()) })({
-      client: fixture.client,
-    } as PluginInput);
+    let metadataCalls = 0;
+    const initializing = createServer({
+      apiKey: () => Effect.succeed(Option.none()),
+      loadModelMetadata: () =>
+        Effect.suspend(() => {
+          metadataCalls += 1;
+          return Effect.die('metadata should remain lazy');
+        }),
+    })({ client: fixture.client } as PluginInput);
 
     await Promise.resolve();
     expect(fixture.providerCalls).toBe(0);
+    expect(metadataCalls).toBe(0);
 
     const hooks = await initializing;
     expect(hooks['chat.message']).toBeFunction();
+    expect(metadataCalls).toBe(0);
   });
 
   test('loads and normalizes the real provider adapter on demand', async () => {
@@ -171,7 +191,10 @@ describe('plugin initialization', () => {
         },
       ],
     });
-    const plugin = createServer({ apiKey: () => Effect.succeed(Option.none()) });
+    const plugin = createServer({
+      apiKey: () => Effect.succeed(Option.none()),
+      loadModelMetadata: unusedMetadata,
+    });
     const hooks = await plugin({ client: fixture.client } as PluginInput);
     expect(hooks['chat.message']).toBeFunction();
     expect(fixture.providerCalls).toBe(0);
@@ -219,6 +242,7 @@ describe('plugin initialization', () => {
     });
     const plugin = createServer({
       apiKey: () => Effect.succeed(Option.none()),
+      loadModelMetadata: unusedMetadata,
       loadCatalog: () =>
         Effect.suspend(() => {
           catalogCalls += 1;
@@ -242,6 +266,7 @@ describe('plugin initialization', () => {
     });
     const plugin = createServer({
       apiKey: () => Effect.succeed(Option.none()),
+      loadModelMetadata: unusedMetadata,
       loadCatalog: () =>
         Effect.sync(() => {
           catalogCalls += 1;
@@ -261,12 +286,12 @@ describe('plugin initialization', () => {
       messages: parentMessages(),
       providersNeverResolve: true,
     });
-    const hooks = await createServer({ apiKey: () => Effect.succeed(Option.none()) })(
-      { client: fixture.client } as PluginInput,
-      {
-        timeoutMs: 10,
-      },
-    );
+    const hooks = await createServer({
+      apiKey: () => Effect.succeed(Option.none()),
+      loadModelMetadata: unusedMetadata,
+    })({ client: fixture.client } as PluginInput, {
+      timeoutMs: 10,
+    });
 
     await hooks['chat.message']!(input(), output());
     expect(fixture.logs.some((entry) => entry.message === 'catalog_load_failed')).toBeTrue();
@@ -279,7 +304,10 @@ describe('plugin initialization', () => {
       messages: parentMessages(),
       providersFail: true,
     });
-    const hooks = await createServer({ apiKey: () => Effect.succeed(Option.none()) })({
+    const hooks = await createServer({
+      apiKey: () => Effect.succeed(Option.none()),
+      loadModelMetadata: unusedMetadata,
+    })({
       client: fixture.client,
     } as PluginInput);
 
@@ -366,6 +394,7 @@ describe('chat.message routing', () => {
     const plugin = createServer({
       apiKey: () => Effect.succeed(Option.some('key')),
       loadCatalog: () => Effect.succeed(variantCatalog()),
+      loadModelMetadata: unusedMetadata,
       ask: (request) => {
         received = request;
         return Effect.succeed(cheapAnswers);
@@ -388,9 +417,29 @@ describe('chat.message routing', () => {
   });
 
   test('routes to a cheaper sibling and removes an inherited variant', async () => {
-    const catalog: CatalogModel[] = [
-      { providerID: 'openai', id: 'sol', family: 'gpt', cost: { input: 10 } },
-      { providerID: 'openai', id: 'luna', family: 'gpt', tool_call: true, cost: { input: 1 } },
+    const catalog: EnabledModel[] = [
+      {
+        providerID: 'openai',
+        modelID: 'sol',
+        family: 'gpt',
+        cost: { bands: [{ fromContext: 0, price: { input: 10, output: 10 } }] },
+        variants: new Set(),
+      },
+      {
+        providerID: 'openai',
+        modelID: 'luna',
+        family: 'gpt',
+        capabilities: {
+          attachment: false,
+          reasoning: false,
+          toolCall: true,
+          structuredOutput: false,
+          input: new Set(),
+          output: new Set(),
+        },
+        cost: { bands: [{ fromContext: 0, price: { input: 1, output: 1 } }] },
+        variants: new Set(),
+      },
     ];
     const fixture = await hooksFor(
       {
@@ -436,6 +485,186 @@ describe('chat.message routing', () => {
     const session = await hooksFor({ sessionFails: true });
     await session.hook(input(), output());
     expect(session.logs.at(-1)?.message).toBe('routing_failed');
+  });
+
+  test('shares one lazy metadata load across concurrent messages', async () => {
+    let metadataCalls = 0;
+    const fixture = makeClient({
+      child: { id: 'child', parentID: 'parent' },
+      parent: { id: 'parent' },
+      messages: parentMessages(),
+    });
+    const plugin = createServer({
+      apiKey: () => Effect.succeed(Option.none()),
+      loadCatalog: () => Effect.succeed(variantCatalog()),
+      loadModelMetadata: () =>
+        Effect.sync(() => {
+          metadataCalls += 1;
+          return emptyMetadata;
+        }),
+    });
+    const hooks = await plugin({ client: fixture.client } as PluginInput);
+    await Promise.all([hooks['chat.message']!(input(), output()), hooks['chat.message']!(input(), output())]);
+    expect(metadataCalls).toBe(1);
+  });
+
+  test('metadata failure falls back without calling Jev when no other target exists', async () => {
+    let asked = false;
+    const fixture = makeClient({
+      child: { id: 'child', parentID: 'parent' },
+      parent: { id: 'parent' },
+      messages: parentMessages('sol', 'medium'),
+    });
+    const plugin = createServer({
+      apiKey: () => Effect.succeed(Option.some('key')),
+      loadCatalog: () => Effect.succeed([]),
+      loadModelMetadata: () => Effect.fail({ _tag: 'ModelMetadataLoadError', cause: new Error('offline') }),
+      ask: () => {
+        asked = true;
+        return Effect.succeed(cheapAnswers);
+      },
+    });
+    const hooks = await plugin({ client: fixture.client } as PluginInput);
+    await hooks['chat.message']!(input('medium'), output('sol', 'medium'));
+    expect(asked).toBeFalse();
+    expect(fixture.logs.some((entry) => entry.message === 'model_metadata_load_failed')).toBeTrue();
+    expect(fixture.logs.at(-1)?.message).toBe('no_fast_target');
+  });
+
+  test('mutates a cross-model target and keeps the parent when Jev says the work is hard', async () => {
+    const capabilities = {
+      attachment: true,
+      reasoning: true,
+      toolCall: true,
+      structuredOutput: true,
+      input: new Set(['text'] as const),
+      output: new Set(['text'] as const),
+    };
+    const catalog: EnabledModel[] = [
+      {
+        providerID: 'acme',
+        modelID: 'nebula-9-grand',
+        sourceID: 'nebula-9-grand',
+        name: 'nebula-9-grand',
+        family: 'nebula-grand',
+        releaseDate: '2030-01-01',
+        cost: { bands: [{ fromContext: 0, price: { input: 12, output: 48 } }] },
+        capabilities,
+        limits: { context: 100_000, output: 16_000 },
+        variants: new Set(['low', 'high']),
+      },
+      {
+        providerID: 'acme',
+        modelID: 'nebula-9-small',
+        sourceID: 'nebula-9-small',
+        name: 'nebula-9-small',
+        family: 'nebula-small',
+        releaseDate: '2030-01-01',
+        cost: { bands: [{ fromContext: 0, price: { input: 1, output: 4 } }] },
+        capabilities,
+        limits: { context: 100_000, output: 16_000 },
+        variants: new Set(['low', 'high']),
+      },
+    ];
+    const metadata = {
+      models: {
+        'acme/nebula-9-grand': {
+          id: 'acme/nebula-9-grand',
+          name: 'nebula-9-grand',
+          description: 'grand',
+          family: 'nebula-grand',
+          release_date: '2030-01-01',
+          limit: { context: 100_000 },
+        },
+        'acme/nebula-9-small': {
+          id: 'acme/nebula-9-small',
+          name: 'nebula-9-small',
+          description: 'small',
+          family: 'nebula-small',
+          release_date: '2030-01-01',
+          limit: { context: 100_000 },
+        },
+      },
+      providers: {
+        acme: {
+          id: 'acme',
+          env: [],
+          npm: 'none',
+          name: 'acme',
+          doc: 'https://example.test',
+          models: {
+            'nebula-9-grand': {
+              id: 'nebula-9-grand',
+              name: 'nebula-9-grand',
+              description: 'grand',
+              family: 'nebula-grand',
+              attachment: true,
+              reasoning: true,
+              tool_call: true,
+              structured_output: true,
+              release_date: '2030-01-01',
+              last_updated: '2030-01-01',
+              modalities: { input: ['text'], output: ['text'] },
+              open_weights: false,
+              limit: { context: 100_000, output: 16_000 },
+              cost: { input: 12, output: 48 },
+            },
+            'nebula-9-small': {
+              id: 'nebula-9-small',
+              name: 'nebula-9-small',
+              description: 'small',
+              family: 'nebula-small',
+              attachment: true,
+              reasoning: true,
+              tool_call: true,
+              structured_output: true,
+              release_date: '2030-01-01',
+              last_updated: '2030-01-01',
+              modalities: { input: ['text'], output: ['text'] },
+              open_weights: false,
+              limit: { context: 100_000, output: 16_000 },
+              cost: { input: 1, output: 4 },
+            },
+          },
+        },
+      },
+    } as unknown as Catalog;
+
+    const setup = {
+      child: { id: 'child', parentID: 'parent' },
+      parent: { id: 'parent' },
+      messages: [
+        {
+          info: {
+            role: 'assistant',
+            providerID: 'acme',
+            modelID: 'nebula-9-grand',
+            variant: 'high',
+            time: { created: 1 },
+          },
+        },
+      ],
+    };
+
+    const cheap = await hooksFor(setup, { key: 'key', catalog, metadata });
+    const routed = output('nebula-9-grand', 'high');
+    (routed as { message: { model: { providerID: string } } }).message.model.providerID = 'acme';
+    await cheap.hook(input(), routed);
+    expect((routed as { message: { model: unknown } }).message.model).toEqual({
+      providerID: 'acme',
+      modelID: 'nebula-9-small',
+      variant: 'low',
+    });
+
+    const hard = await hooksFor(setup, { key: 'key', catalog, metadata, answers: hardAnswers });
+    const kept = output('nebula-9-grand', 'high');
+    (kept as { message: { model: { providerID: string } } }).message.model.providerID = 'acme';
+    await hard.hook(input(), kept);
+    expect((kept as { message: { model: unknown } }).message.model).toEqual({
+      providerID: 'acme',
+      modelID: 'nebula-9-grand',
+      variant: 'high',
+    });
   });
 });
 

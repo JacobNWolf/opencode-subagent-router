@@ -30,12 +30,17 @@ A keep-parent result shows a warning toast. Every outcome is logged under the `j
 The cheap model comes from OpenCode's enabled provider catalog, in this order:
 
 1. The last matching route override, if it changes the model or lowers effort.
-2. The same model at `low` effort when the parent uses `high`, `xhigh`, or `max`.
-3. The cheapest non-deprecated, tool-capable model in the same provider and model family.
+2. The cheapest compatible model in the same inferred lab generation.
+3. The same model at `low` effort when the parent uses `high`, `xhigh`, or `max`.
+4. The cheapest eligible exact-family sibling.
+
+Cross-model selection stays on the same enabled OpenCode provider. It infers lab, lineage, and major version from Models.dev metadata rather than a table of model names. Both input and output prices must be strictly cheaper on every compared context tier, and the candidate must preserve the parent's agent-critical capabilities and limits. Ambiguous identity or cost data disables only this step.
+
+A Models.dev network failure uses the package snapshot. If metadata is missing entirely, the router falls back to same-model `low` and the older exact-family rule.
 
 Jev is only called after a fast target exists. Search, mechanical edits, review, and bounded implementation can downgrade. Architecture, diagnosis, and anything that needs deep reasoning stay on the parent.
 
-Optional overrides help when catalog family or cost metadata is missing:
+Optional overrides remain the escape hatch when metadata is incomplete:
 
 ```json
 {
