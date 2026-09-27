@@ -78,19 +78,23 @@ function uniqueSourceModel(enabled: EnabledModel, catalog: Catalog): ModelsDevMo
   return hits[0];
 }
 
+function listedCostAgrees(openCode: PriceSchedule, listed: PriceSchedule): boolean {
+  const openBase = openCode.bands[0]?.price;
+  const listedBase = listed.bands[0]?.price;
+  return (
+    openBase !== undefined &&
+    listedBase !== undefined &&
+    openBase.input === listedBase.input &&
+    openBase.output === listedBase.output
+  );
+}
+
+/** Prefer Models.dev list prices when OpenCode omits cost or reports subscription/non-list rates. */
 function actualCost(enabled: EnabledModel, source: ModelsDevModel | undefined): PriceSchedule | undefined {
   const openCode = enabled.cost;
-  if (!openCode) return undefined;
-  if (!source) return openCode;
-
-  const matched = priceScheduleOf(source.cost);
-  if (!matched) return openCode;
-
-  const openBase = openCode.bands[0]?.price;
-  const matchedBase = matched.bands[0]?.price;
-  if (!openBase || !matchedBase) return undefined;
-  if (openBase.input !== matchedBase.input || openBase.output !== matchedBase.output) return undefined;
-  return matched;
+  const listed = source ? priceScheduleOf(source.cost) : undefined;
+  if (openCode && listed && listedCostAgrees(openCode, listed)) return listed;
+  return listed ?? openCode;
 }
 
 function withActualCost(enabled: EnabledModel, cost: PriceSchedule | undefined): EnabledModel {
@@ -167,69 +171,72 @@ function buildProfiles(enabledModels: readonly EnabledModel[], catalog: Catalog)
   });
 }
 
-function generationLabel(identity: { lab: string; lineage: string; generation: number }): string {
-  return `${identity.lab}:${identity.lineage}:${identity.generation}`;
+function parentUnresolved(parent: ModelProfile | undefined): Readonly<Record<string, unknown>> | undefined {
+  if (!parent) return { crossModel: 'parent_not_in_catalog' };
+
+  if (parent.source?.type === 'decision') return { crossModel: 'parent_decision_model' };
+
+  const missing = compact([
+    parent.canonical ? undefined : 'canonical',
+    parent.enabled.cost ? undefined : 'cost',
+    parent.enabled.limits ? undefined : 'limits',
+    parent.marketCost ? undefined : 'market_cost',
+  ]);
+  if (missing.length === 0) return undefined;
+
+  return { crossModel: 'parent_unresolved', missing };
 }
 
-function costBands(schedule: PriceSchedule) {
-  return schedule.bands.map((band) => ({
-    fromContext: band.fromContext,
-    input: band.price.input,
-    output: band.price.output,
-  }));
-}
+function candidateSkip(parent: ModelProfile, candidate: ModelProfile, parentRef: ModelRef): string | undefined {
+  if (sameSelectableModel(candidate.enabled, parentRef)) return undefined;
+  if (candidate.enabled.providerID !== parent.enabled.providerID) return 'different_provider';
 
-function modelDetails(profile: ModelProfile) {
-  return {
-    selectable: `${profile.enabled.providerID}/${profile.enabled.modelID}`,
-    ...(profile.canonical === undefined
-      ? {}
-      : {
-          canonical: profile.canonical.id,
-          generation: generationLabel(profile.canonical),
-        }),
-    ...(profile.enabled.cost === undefined ? {} : { actualCost: costBands(profile.enabled.cost) }),
-    ...(profile.marketCost === undefined ? {} : { marketMedianCost: costBands(profile.marketCost.schedule) }),
-  };
+  if (!candidate.canonical) return 'missing_canonical';
+  if (!candidate.enabled.cost) return 'missing_cost';
+  if (!candidate.marketCost) return 'missing_market_cost';
+  if (candidate.source?.type === 'decision') return 'decision_model';
+
+  if (!sameGeneration(candidate.canonical, parent.canonical!)) return 'different_generation';
+  if (!preservesCapabilities(parent.enabled, candidate.enabled)) return 'capabilities';
+
+  if (!scheduleIsStrictlyCheaper(candidate.enabled.cost, parent.enabled.cost!, parent.enabled.limits!.context)) {
+    return 'actual_cost';
+  }
+  if (
+    !scheduleIsStrictlyCheaper(
+      candidate.marketCost.schedule,
+      parent.marketCost!.schedule,
+      parent.enabled.limits!.context,
+    )
+  ) {
+    return 'market_cost';
+  }
+
+  return undefined;
 }
 
 function resolveCrossModel(
   parentRef: ModelRef,
   enabledModels: readonly EnabledModel[],
   catalog: Catalog,
-): { readonly target: ModelRef; readonly details: Readonly<Record<string, unknown>> } | undefined {
+): {
+  readonly target?: ModelRef;
+  readonly details?: Readonly<Record<string, unknown>>;
+} {
   const profiles = buildProfiles(enabledModels, catalog);
   const parent = profiles.find((profile) => sameSelectableModel(profile.enabled, parentRef));
-  if (!parent?.canonical || !parent.enabled.cost || !parent.enabled.limits || !parent.marketCost) return undefined;
-  if (parent.source?.type === 'decision') return undefined;
+  const unresolved = parentUnresolved(parent);
+  if (unresolved || !parent) return { details: unresolved ?? { crossModel: 'parent_not_in_catalog' } };
 
-  const candidates = profiles.filter((candidate) => {
-    if (!candidate.canonical || !candidate.enabled.cost || !candidate.marketCost) return false;
-    if (candidate.source?.type === 'decision') return false;
-    if (sameSelectableModel(candidate.enabled, parentRef)) return false;
-    if (candidate.enabled.providerID !== parent.enabled.providerID) return false;
-    if (!sameGeneration(candidate.canonical, parent.canonical!)) return false;
-    if (!preservesCapabilities(parent.enabled, candidate.enabled)) return false;
-    if (!scheduleIsStrictlyCheaper(candidate.enabled.cost, parent.enabled.cost!, parent.enabled.limits!.context)) {
-      return false;
-    }
-    return scheduleIsStrictlyCheaper(
-      candidate.marketCost.schedule,
-      parent.marketCost!.schedule,
-      parent.enabled.limits!.context,
-    );
-  });
-
-  const target = uniqueCheapest(candidates, parent.enabled.limits.context);
-  if (!target) return undefined;
+  const candidates = profiles.filter(
+    (candidate) =>
+      candidateSkip(parent, candidate, parentRef) === undefined && !sameSelectableModel(candidate.enabled, parentRef),
+  );
+  const target = uniqueCheapest(candidates, parent.enabled.limits!.context);
+  if (target) return { target: targetRef(target.enabled) };
 
   return {
-    target: targetRef(target.enabled),
-    details: {
-      reason: 'same_generation_cheaper',
-      parent: modelDetails(parent),
-      target: modelDetails(target),
-    },
+    details: { crossModel: candidates.length === 0 ? 'no_eligible_candidate' : 'no_unique_cheapest' },
   };
 }
 
@@ -283,20 +290,39 @@ export function resolveFastDecision(
     return { target: override, reason: 'explicit_route' };
   }
 
-  if (context.modelsDev) {
-    const crossModel = resolveCrossModel(parent, enabledModels, context.modelsDev);
-    if (crossModel) {
-      return { target: crossModel.target, reason: 'same_generation_cheaper', details: crossModel.details };
-    }
+  const crossModel = context.modelsDev
+    ? resolveCrossModel(parent, enabledModels, context.modelsDev)
+    : { details: { crossModel: 'models_dev_unavailable' } };
+  if (crossModel.target) {
+    return {
+      target: crossModel.target,
+      reason: 'same_generation_cheaper',
+      ...(crossModel.details === undefined ? {} : { details: crossModel.details }),
+    };
   }
 
   const lowEffort = resolveLowEffort(parent, enabledModels);
-  if (lowEffort) return { target: lowEffort, reason: 'same_model_low' };
+  if (lowEffort) {
+    return {
+      target: lowEffort,
+      reason: 'same_model_low',
+      ...(crossModel.details === undefined ? {} : { details: crossModel.details }),
+    };
+  }
 
   const sibling = resolveLegacySibling(parent, enabledModels);
-  if (sibling) return { target: sibling, reason: 'exact_family_sibling' };
+  if (sibling) {
+    return {
+      target: sibling,
+      reason: 'exact_family_sibling',
+      ...(crossModel.details === undefined ? {} : { details: crossModel.details }),
+    };
+  }
 
-  return { reason: 'no_fast_target' };
+  return {
+    reason: 'no_fast_target',
+    ...(crossModel.details === undefined ? {} : { details: crossModel.details }),
+  };
 }
 
 export function resolveFast(

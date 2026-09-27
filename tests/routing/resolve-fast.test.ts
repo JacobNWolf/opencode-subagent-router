@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import type { Catalog, Model, ModelCost, ModelFamily, ModelMetadata } from '@opencode-ai/models/effect';
 
-import { matchRoute, resolveFast } from '../../src/routing/resolve-fast';
+import { matchRoute, resolveFast, resolveFastDecision } from '../../src/routing/resolve-fast';
 import type { EnabledModel, ModelRef, PriceSchedule, Route } from '../../src/routing/types';
 
 const sol: ModelRef = { providerID: 'openai', modelID: 'gpt-sol', variant: 'high' };
@@ -427,10 +427,46 @@ describe('resolveFast', () => {
 
   test('falls back to same-model low when metadata is absent', () => {
     const enabled = [enabledModel('acme', 'nebula-9-grand', baseSchedule(12, 48), { family: 'nebula-grand' })];
-    expect(resolveFast({ providerID: 'acme', modelID: 'nebula-9-grand', variant: 'high' }, enabled)).toEqual({
+    const parent = { providerID: 'acme', modelID: 'nebula-9-grand', variant: 'high' as const };
+    expect(resolveFast(parent, enabled)).toEqual({
       providerID: 'acme',
       modelID: 'nebula-9-grand',
       variant: 'low',
+    });
+    expect(resolveFastDecision(parent, enabled).details).toEqual({ crossModel: 'models_dev_unavailable' });
+  });
+
+  test('uses Models.dev list prices when OpenCode reports subscription cost', () => {
+    const modelsDev = syntheticCatalog([
+      { canonicalID: 'openai/gpt-5.6-sol', family: 'gpt-sol', cost: { input: 4, output: 20 } },
+      { canonicalID: 'openai/gpt-5.6-luna', family: 'gpt-luna', cost: { input: 0.2, output: 1.2 } },
+    ]);
+    const parent = { providerID: 'openai', modelID: 'gpt-5.6-sol', variant: 'high' as const };
+    const luna = enabledModel('openai', 'gpt-5.6-luna', baseSchedule(0, 0), { family: 'gpt-luna' });
+    const subscribed = enabledModel('openai', 'gpt-5.6-sol', baseSchedule(0, 0), { family: 'gpt-sol' });
+    expect(resolveFast(parent, [subscribed, luna], { modelsDev })).toEqual({
+      providerID: 'openai',
+      modelID: 'gpt-5.6-luna',
+      variant: 'low',
+    });
+  });
+
+  test('explains why a cheaper model in another major is not selected', () => {
+    const enabled = [
+      enabledModel('openai', 'gpt-5.6-sol', baseSchedule(4, 20), { family: 'gpt-sol' }),
+      enabledModel('openai', 'gpt-6-luna', baseSchedule(0.1, 0.5), { family: 'gpt-luna' }),
+    ];
+    const modelsDev = syntheticCatalog([
+      { canonicalID: 'openai/gpt-5.6-sol', family: 'gpt-sol', cost: { input: 4, output: 20 } },
+      { canonicalID: 'openai/gpt-6-luna', family: 'gpt-luna', cost: { input: 0.1, output: 0.5 } },
+    ]);
+    const decision = resolveFastDecision({ providerID: 'openai', modelID: 'gpt-5.6-sol', variant: 'high' }, enabled, {
+      modelsDev,
+    });
+    expect(decision).toMatchObject({
+      reason: 'same_model_low',
+      target: { providerID: 'openai', modelID: 'gpt-5.6-sol', variant: 'low' },
+      details: { crossModel: 'no_eligible_candidate' },
     });
   });
 });
