@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import type { Catalog, Model, ModelCost, ModelFamily, ModelMetadata } from '@opencode-ai/models/effect';
+import { omit } from 'es-toolkit';
 
 import { matchRoute, resolveFast, resolveFastDecision } from '../../src/routing/resolve-fast';
 import type { EnabledModel, ModelRef, PriceSchedule, Route } from '../../src/routing/types';
@@ -466,6 +467,68 @@ describe('resolveFast', () => {
     expect(decision).toMatchObject({
       reason: 'same_model_low',
       target: { providerID: 'openai', modelID: 'gpt-5.6-sol', variant: 'low' },
+      details: { crossModel: 'no_eligible_candidate' },
+    });
+  });
+
+  test('fills family from source or canonical metadata', () => {
+    const parent = { providerID: 'acme', modelID: 'nebula-9-grand', variant: 'high' as const };
+    const enabled = [
+      enabledModel('acme', 'nebula-9-grand', baseSchedule(12, 48)),
+      enabledModel('acme', 'nebula-9-small', baseSchedule(1, 4)),
+    ].map((model) => omit(model, ['family']));
+    const modelsDev = syntheticCatalog([
+      { canonicalID: 'acme/nebula-9-grand', family: 'nebula-grand', cost: { input: 12, output: 48 } },
+      { canonicalID: 'acme/nebula-9-small', family: 'nebula-small', cost: { input: 1, output: 4 } },
+    ]);
+    const cheaper = { providerID: 'acme', modelID: 'nebula-9-small', variant: 'low' };
+
+    expect(resolveFast(parent, enabled, { modelsDev })).toEqual(cheaper);
+
+    const sourceWithoutFamily = structuredClone(modelsDev);
+    for (const provider of Object.values(sourceWithoutFamily.providers)) {
+      for (const model of Object.values(provider.models)) {
+        delete (model as { family?: string }).family;
+      }
+    }
+    expect(resolveFast(parent, enabled, { modelsDev: sourceWithoutFamily })).toEqual(cheaper);
+
+    const unresolved = { ...sourceWithoutFamily, models: {} };
+    expect(resolveFast(parent, enabled, { modelsDev: unresolved })).toEqual({
+      providerID: 'acme',
+      modelID: 'nebula-9-grand',
+      variant: 'low',
+    });
+  });
+
+  test('rejects a cheaper list price that is not cheaper on the market', () => {
+    const enabled = [
+      enabledModel('acme', 'nebula-9-grand', baseSchedule(12, 48), { family: 'nebula-grand' }),
+      enabledModel('acme', 'nebula-9-small', baseSchedule(1, 4), { family: 'nebula-small' }),
+    ];
+    const modelsDev = structuredClone(
+      syntheticCatalog([
+        { canonicalID: 'acme/nebula-9-grand', family: 'nebula-grand', cost: { input: 12, output: 48 } },
+        { canonicalID: 'acme/nebula-9-small', family: 'nebula-small', cost: { input: 1, output: 4 } },
+      ]),
+    );
+    const expensive = providerModel('nebula-9-small', 'nebula-small', { input: 20, output: 80 });
+    for (const id of ['other', 'third']) {
+      modelsDev.providers[id] = {
+        id,
+        env: [],
+        npm: 'none',
+        name: id,
+        doc: 'https://example.test',
+        models: { 'nebula-9-small': expensive },
+      };
+    }
+
+    expect(
+      resolveFastDecision({ providerID: 'acme', modelID: 'nebula-9-grand', variant: 'high' }, enabled, { modelsDev }),
+    ).toMatchObject({
+      reason: 'same_model_low',
+      target: { providerID: 'acme', modelID: 'nebula-9-grand', variant: 'low' },
       details: { crossModel: 'no_eligible_candidate' },
     });
   });

@@ -10,6 +10,8 @@ export type { EnabledModel, ModelRef, ResolveContext, Route } from './types';
 const EFFORT = ['none', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 type Effort = (typeof EFFORT)[number];
 
+const marketCostsByCatalog = new WeakMap<Catalog, Map<string, CostEstimate>>();
+
 function parseModel(id: string): ModelRef | undefined {
   const separator = id.indexOf('/');
   if (separator <= 0 || separator === id.length - 1) return undefined;
@@ -154,7 +156,13 @@ function familyOf(
 }
 
 function buildProfiles(enabledModels: readonly EnabledModel[], catalog: Catalog): ModelProfile[] {
-  const market = indexMarketCosts(catalog);
+  let market = marketCostsByCatalog.get(catalog);
+
+  if (!market) {
+    market = indexMarketCosts(catalog);
+    marketCostsByCatalog.set(catalog, market);
+  }
+
   return enabledModels.map((enabled) => {
     const canonicalID = resolveCanonicalID(enabled, catalog);
     const source = uniqueSourceModel(enabled, catalog);

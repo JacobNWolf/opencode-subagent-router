@@ -34,7 +34,7 @@ The cheap model comes from OpenCode's enabled provider catalog, in this order:
 3. The same model at `low` effort when the parent uses `high`, `xhigh`, or `max`.
 4. The cheapest eligible exact-family sibling.
 
-Cross-model selection stays on the same enabled OpenCode provider. It infers lab, lineage, and major version from Models.dev metadata rather than a table of model names. Both input and output prices must be strictly cheaper on every compared context tier, and the candidate must preserve the parent's agent-critical capabilities and limits. OpenCode subscription or other non-list rates fall back to Models.dev list prices instead of disabling this step. Ambiguous identity or cost data disables only this step.
+Cross-model selection stays on the same enabled OpenCode provider. It infers lab, lineage, and major version from Models.dev metadata rather than a table of model names. Input and output prices must be no higher at every compared context tier, with at least one price strictly lower, and the candidate must preserve the parent's agent-critical capabilities and limits. OpenCode subscription or other non-list rates fall back to Models.dev list prices instead of disabling this step. Ambiguous identity or cost data disables only this step.
 
 A Models.dev network failure uses the package snapshot. If metadata is missing entirely, the router falls back to same-model `low` and the older exact-family rule.
 
