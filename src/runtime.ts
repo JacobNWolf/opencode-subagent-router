@@ -2,10 +2,12 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+import type { Modality } from '@opencode-ai/models/effect';
 import { Effect, Option, Schema } from 'effect';
-import { flatMap, isNotNil, isUndefined, omitBy } from 'es-toolkit';
+import { compact, flatMap, isUndefined, omitBy } from 'es-toolkit';
 
-import type { CatalogModel, ModelRef, Route } from './resolve-fast';
+import { tokenPriceOf } from './routing/pricing';
+import type { EnabledModel, ModelCapabilities, ModelLimits, ModelRef, Route } from './routing/types';
 
 export type RouterOptions = {
   readonly timeoutMs: number;
@@ -15,12 +17,48 @@ export type RouterOptions = {
 
 type SourceModel = {
   readonly id?: string;
+  readonly name?: string;
   readonly family?: string;
-  readonly tool_call?: boolean;
+  readonly release_date?: string;
   readonly status?: string;
-  readonly cost?: { readonly input?: number };
+  readonly tool_call?: boolean;
+  readonly attachment?: boolean;
+  readonly reasoning?: boolean;
+  readonly structured_output?: boolean;
+  readonly cost?: {
+    readonly input?: number;
+    readonly output?: number;
+    readonly tiers?: readonly {
+      readonly input?: number;
+      readonly output?: number;
+      readonly tier?: { readonly type?: string; readonly size?: number };
+    }[];
+    readonly context_over_200k?: {
+      readonly input?: number;
+      readonly output?: number;
+    };
+    readonly experimentalOver200K?: {
+      readonly input?: number;
+      readonly output?: number;
+    };
+  };
+  readonly limit?: {
+    readonly context?: number;
+    readonly input?: number;
+    readonly output?: number;
+  };
+  readonly modalities?: {
+    readonly input?: readonly string[];
+    readonly output?: readonly string[];
+  };
   readonly variants?: Readonly<Record<string, unknown>>;
-  readonly capabilities?: { readonly toolcall?: boolean };
+  readonly capabilities?: {
+    readonly attachment?: boolean;
+    readonly reasoning?: boolean;
+    readonly toolcall?: boolean;
+    readonly input?: Readonly<Record<string, boolean>>;
+    readonly output?: Readonly<Record<string, boolean>>;
+  };
 };
 
 type SourceProvider = {
@@ -79,7 +117,7 @@ function compactUndefined<T extends Record<PropertyKey, unknown>>(value: T): Com
 
 export function parseOptions(options?: Readonly<Record<string, unknown>>): RouterOptions {
   const routes = Array.isArray(options?.routes)
-    ? options.routes.map((route) => Option.getOrUndefined(decodeRoute(route))).filter(isNotNil)
+    ? compact(options.routes.map((route) => Option.getOrUndefined(decodeRoute(route))))
     : [];
 
   return {
@@ -89,19 +127,92 @@ export function parseOptions(options?: Readonly<Record<string, unknown>>): Route
   };
 }
 
-export function catalogFromProviders(value: readonly SourceProvider[] | undefined): CatalogModel[] {
+const MODALITIES = new Set<Modality>(['text', 'audio', 'image', 'video', 'pdf']);
+
+function modalitySet(
+  raw?: readonly string[],
+  flags?: Readonly<Record<string, boolean>>,
+): ReadonlySet<Modality> | undefined {
+  if (raw) {
+    const items = raw.filter((item): item is Modality => MODALITIES.has(item as Modality));
+    if (items.length !== raw.length) return undefined;
+    return new Set(items);
+  }
+
+  if (!flags) return undefined;
+
+  return new Set(
+    Object.entries(flags)
+      .filter(([, enabled]) => enabled)
+      .map(([item]) => item)
+      .filter((item): item is Modality => MODALITIES.has(item as Modality)),
+  );
+}
+
+function capabilitiesOf(rawModel: SourceModel): ModelCapabilities | undefined {
+  const toolCall = rawModel.tool_call ?? rawModel.capabilities?.toolcall;
+  const attachment = rawModel.attachment ?? rawModel.capabilities?.attachment;
+  const reasoning = rawModel.reasoning ?? rawModel.capabilities?.reasoning;
+
+  const structuredOutput = rawModel.structured_output;
+  const input = modalitySet(rawModel.modalities?.input, rawModel.capabilities?.input);
+  const output = modalitySet(rawModel.modalities?.output, rawModel.capabilities?.output);
+
+  const malformedModalities =
+    (rawModel.modalities?.input !== undefined && input === undefined) ||
+    (rawModel.modalities?.output !== undefined && output === undefined);
+  if (
+    toolCall === undefined &&
+    attachment === undefined &&
+    reasoning === undefined &&
+    structuredOutput === undefined &&
+    (malformedModalities || (input === undefined && output === undefined))
+  ) {
+    return undefined;
+  }
+
+  return {
+    attachment: attachment ?? false,
+    reasoning: reasoning ?? false,
+    toolCall: toolCall ?? false,
+    structuredOutput: structuredOutput ?? false,
+    input: input ?? new Set(),
+    output: output ?? new Set(),
+  };
+}
+
+function limitsOf(limit: SourceModel['limit']): ModelLimits | undefined {
+  if (limit?.context === undefined || limit.output === undefined) return undefined;
+  if (!Number.isFinite(limit.context) || !Number.isFinite(limit.output)) return undefined;
+
+  return compactUndefined({
+    context: limit.context,
+    output: limit.output,
+    input: limit.input,
+  });
+}
+
+export function catalogFromProviders(value: readonly SourceProvider[] | undefined): EnabledModel[] {
   return flatMap(value ?? [], (provider) =>
-    Object.entries(provider.models).map(([key, rawModel]) => {
-      const toolCall = rawModel.tool_call ?? rawModel.capabilities?.toolcall;
+    Object.entries(provider.models).map(([selectableID, rawModel]) => {
+      const price = tokenPriceOf({
+        input: rawModel.cost?.input ?? Number.NaN,
+        output: rawModel.cost?.output ?? Number.NaN,
+      });
+
       return compactUndefined({
         providerID: provider.id,
-        id: rawModel.id ?? key,
+        modelID: selectableID,
+        sourceID: rawModel.id,
+        name: rawModel.name,
         family: rawModel.family,
-        tool_call: toolCall,
+        releaseDate: rawModel.release_date,
         status: rawModel.status,
-        cost: rawModel.cost?.input === undefined ? undefined : { input: rawModel.cost.input },
-        variants: rawModel.variants,
-      }) satisfies CatalogModel;
+        cost: price ? { bands: [{ fromContext: 0, price }] } : undefined,
+        capabilities: capabilitiesOf(rawModel),
+        limits: limitsOf(rawModel.limit),
+        variants: new Set(Object.keys(rawModel.variants ?? {})),
+      }) satisfies EnabledModel;
     }),
   );
 }
@@ -144,7 +255,8 @@ const readTextFile = (path: string) => readFileSync(path, 'utf8');
 
 function nonEmptyString(value: string | undefined): Option.Option<string> {
   const trimmed = value?.trim();
-  return trimmed ? Option.some(trimmed) : Option.none();
+  if (!trimmed) return Option.none();
+  return Option.some(trimmed);
 }
 
 export function readOpenCodeOpenRouterKey(
