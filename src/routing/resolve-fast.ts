@@ -1,7 +1,13 @@
 import type { Catalog, Model as ModelsDevModel } from '@opencode-ai/models';
 import { compact, last, minBy, omit, uniqBy } from 'es-toolkit';
 
-import { canonicalIdentityOf, preservesCapabilities, resolveCanonicalID, sameGeneration } from './identity';
+import {
+  canonicalIdentityOf,
+  preservesCapabilities,
+  resolveCanonicalID,
+  sameGeneration,
+  upstreamProviderOf,
+} from './identity';
 import { marketCost, priceScheduleOf, scheduleIsStrictlyCheaper, uniqueCheapest } from './pricing';
 import type { CostEstimate, EnabledModel, ModelProfile, ModelRef, PriceSchedule, ResolveContext, Route } from './types';
 
@@ -78,6 +84,17 @@ function uniqueSourceModel(enabled: EnabledModel, catalog: Catalog): ModelsDevMo
 
   if (hits.length !== 1) return undefined;
   return hits[0];
+}
+
+/** Harness providers have no Models.dev offering of their own; read the upstream lab's listing instead. */
+function upstreamSourceModel(
+  enabled: EnabledModel,
+  canonicalID: string | undefined,
+  catalog: Catalog,
+): ModelsDevModel | undefined {
+  const upstream = upstreamProviderOf(enabled.providerID);
+  if (!upstream || !canonicalID) return undefined;
+  return catalog.providers[upstream]?.models[canonicalID.slice(upstream.length + 1)];
 }
 
 function listedCostAgrees(openCode: PriceSchedule, listed: PriceSchedule): boolean {
@@ -165,7 +182,7 @@ function buildProfiles(enabledModels: readonly EnabledModel[], catalog: Catalog)
 
   return enabledModels.map((enabled) => {
     const canonicalID = resolveCanonicalID(enabled, catalog);
-    const source = uniqueSourceModel(enabled, catalog);
+    const source = uniqueSourceModel(enabled, catalog) ?? upstreamSourceModel(enabled, canonicalID, catalog);
     const family = familyOf(enabled, source, canonicalID, catalog);
     const canonical = canonicalID ? canonicalIdentityOf(canonicalID, family) : undefined;
     const cost = actualCost(enabled, source);

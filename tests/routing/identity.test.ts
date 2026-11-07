@@ -127,6 +127,24 @@ describe('resolveCanonicalID', () => {
   test('returns undefined without throwing when nothing matches', () => {
     expect(resolveCanonicalID(enabled('openai', 'missing'), catalog([]))).toBeUndefined();
   });
+
+  test('maps Claude Agent IDs and short names onto Anthropic models', () => {
+    const models = catalog([
+      metadata('anthropic/claude-opus-5-5', 'claude-opus', { name: 'Claude Opus 5.5' }),
+      metadata('anthropic/claude-sonnet-5', 'claude-sonnet', { name: 'Claude Sonnet 5' }),
+      metadata('anthropic/claude-haiku-4-5', 'claude-haiku', { name: 'Claude Haiku 4.5 (latest)' }),
+      metadata('anthropic/claude-haiku-4-5-20251001', 'claude-haiku', { name: 'Claude Haiku 4.5' }),
+      metadata('openrouter/opus-5-5', 'claude-opus', { name: 'Opus 5.5' }),
+    ]);
+    const agent = (modelID: string, name?: string) =>
+      enabled('claude-agent', modelID, { sourceID: modelID, ...(name ? { name } : {}) });
+
+    expect(resolveCanonicalID(agent('claude-sonnet-5', 'Sonnet 5'), models)).toBe('anthropic/claude-sonnet-5');
+    expect(resolveCanonicalID(agent('opus', 'Opus 5.5'), models)).toBe('anthropic/claude-opus-5-5');
+    expect(resolveCanonicalID(agent('haiku-alias', 'Haiku 4.5'), models)).toBe('anthropic/claude-haiku-4-5-20251001');
+    expect(resolveCanonicalID(agent('mystery', 'Mystery 1'), models)).toBeUndefined();
+    expect(resolveCanonicalID(agent('unnamed'), models)).toBeUndefined();
+  });
 });
 
 describe('generation inference', () => {

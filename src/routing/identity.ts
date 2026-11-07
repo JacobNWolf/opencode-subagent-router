@@ -56,7 +56,38 @@ function fingerprintCanonicalIDs(model: EnabledModel, catalog: Catalog): string[
     .map((metadata) => metadata.id);
 }
 
+/** Harness providers that serve another provider's models under their own IDs and short display names. */
+const UPSTREAM_PROVIDERS: Readonly<Record<string, string>> = { 'claude-agent': 'anthropic' };
+
+export function upstreamProviderOf(providerID: string): string | undefined {
+  return UPSTREAM_PROVIDERS[providerID];
+}
+
+/** Matches `opus` named "Opus 5.5" to `anthropic/claude-opus-5-5` named "Claude Opus 5.5". */
+function upstreamCanonicalIDs(model: EnabledModel, catalog: Catalog, upstream: string): string[] {
+  const direct = uniq(
+    [model.modelID, model.sourceID]
+      .filter((id): id is string => id !== undefined)
+      .map((id) => `${upstream}/${id}`)
+      .filter((key) => catalog.models[key] !== undefined),
+  );
+  if (direct.length > 0) return direct;
+
+  const name = normalizedName(model.name);
+  if (!name) return [];
+
+  return Object.values(catalog.models)
+    .filter((metadata) => {
+      const candidate = normalizedName(metadata.name);
+      return metadata.id.startsWith(`${upstream}/`) && (candidate === name || candidate?.endsWith(` ${name}`));
+    })
+    .map((metadata) => metadata.id);
+}
+
 export function resolveCanonicalID(model: EnabledModel, catalog: Catalog): string | undefined {
+  const upstream = upstreamProviderOf(model.providerID);
+  if (upstream) return unique(upstreamCanonicalIDs(model, catalog, upstream));
+
   const direct = directCanonicalIDs(model, catalog);
   if (direct.length > 0) return unique(direct);
 

@@ -29,6 +29,10 @@ Every outcome is logged under the `jev-router` service in the OpenCode server lo
 
 On V2, the router fills the `subagent` tool's `model` before the child session starts. It skips follow-ups to an existing subagent and tasks whose call or agent already sets a model.
 
+### Claude Agent
+
+OpenCode's Claude Agent provider (`claude-agent`), which uses a Claude subscription through the Agent SDK, works like any other provider. Its models (`opus`, `sonnet`, `haiku`, `fable`, and full IDs such as `claude-sonnet-5`) are matched to their Anthropic entries on Models.dev by ID or display name, and compared at Anthropic list prices because the subscription reports no cost. For example, `claude-agent/opus` routes cheap work to `claude-agent/haiku#low`.
+
 ## How a fast target is chosen
 
 The cheap model comes from OpenCode's enabled provider catalog, in this order:
