@@ -43,9 +43,9 @@ type SourceModel = {
     };
   };
   readonly limit?: {
-    readonly context?: number;
-    readonly input?: number;
-    readonly output?: number;
+    readonly context?: number | undefined;
+    readonly input?: number | undefined;
+    readonly output?: number | undefined;
   };
   readonly modalities?: {
     readonly input?: readonly string[];
@@ -214,6 +214,55 @@ export function catalogFromProviders(value: readonly SourceProvider[] | undefine
         variants: new Set(Object.keys(rawModel.variants ?? {})),
       }) satisfies EnabledModel;
     }),
+  );
+}
+
+/** The V2 `Model.Info` fields the router reads. */
+export type CatalogModel = {
+  readonly id: string;
+  readonly providerID: string;
+  readonly modelID?: string | undefined;
+  readonly name?: string | undefined;
+  readonly family?: string | undefined;
+  readonly status?: string | undefined;
+  readonly enabled?: boolean | undefined;
+  readonly time?: { readonly released?: number | undefined } | undefined;
+  readonly capabilities?:
+    | {
+        readonly tools?: boolean | undefined;
+        readonly input?: readonly string[] | undefined;
+        readonly output?: readonly string[] | undefined;
+      }
+    | undefined;
+  readonly cost?: readonly { readonly tier?: unknown; readonly input: number; readonly output: number }[] | undefined;
+  readonly limit?: SourceModel['limit'] | undefined;
+  readonly variants?: readonly { readonly id: string }[] | undefined;
+};
+
+function sourceModelOf(model: CatalogModel): SourceModel {
+  const released = model.time?.released;
+  const base = model.cost?.find((tier) => tier.tier === undefined);
+  return compactUndefined({
+    id: model.modelID,
+    name: model.name,
+    family: model.family,
+    status: model.status,
+    release_date: released ? new Date(released).toISOString().slice(0, 10) : undefined,
+    tool_call: model.capabilities?.tools,
+    modalities:
+      model.capabilities && compactUndefined({ input: model.capabilities.input, output: model.capabilities.output }),
+    cost: base && { input: base.input, output: base.output },
+    limit: model.limit,
+    variants: Object.fromEntries((model.variants ?? []).map((variant) => [variant.id, variant])),
+  });
+}
+
+/** Normalizes the V2 `ctx.model.list()` catalog into the same shape as the V1 provider catalog. */
+export function catalogFromModels(models: readonly CatalogModel[] | undefined): EnabledModel[] {
+  return catalogFromProviders(
+    (models ?? [])
+      .filter((model) => model.enabled !== false)
+      .map((model) => ({ id: model.providerID, models: { [model.id]: sourceModelOf(model) } })),
   );
 }
 

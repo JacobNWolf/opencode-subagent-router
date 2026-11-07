@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { Effect, Option } from 'effect';
 
 import {
+  catalogFromModels,
   catalogFromProviders,
   getOpenRouterApiKey,
   latestAssistantModel,
@@ -171,6 +172,68 @@ describe('catalogFromProviders', () => {
       modelID: 'broken',
       variants: new Set(),
     });
+  });
+});
+
+describe('catalogFromModels', () => {
+  test('normalizes V2 model info like the V1 provider catalog', () => {
+    expect(
+      catalogFromModels([
+        {
+          id: 'opus',
+          modelID: 'opus',
+          providerID: 'claude-agent',
+          name: 'Opus 5.5',
+          status: 'active',
+          enabled: true,
+          time: { released: 0 },
+          capabilities: { tools: true, input: ['text', 'image'], output: ['text'] },
+          cost: [],
+          limit: { context: 1_000_000, output: 0 },
+          variants: [{ id: 'low' }, { id: 'high' }],
+        },
+        {
+          id: 'anthropic/claude-haiku-5.5',
+          modelID: 'anthropic/claude-haiku-5.5',
+          providerID: 'openrouter',
+          family: 'claude-haiku',
+          time: { released: Date.UTC(2026, 9, 7) },
+          cost: [
+            { tier: { type: 'context', size: 200_000 }, input: 0.2, output: 1 },
+            { input: 0.1, output: 0.5 },
+          ],
+        },
+        { id: 'hidden', providerID: 'openrouter', enabled: false },
+      ]),
+    ).toEqual([
+      {
+        providerID: 'claude-agent',
+        modelID: 'opus',
+        sourceID: 'opus',
+        name: 'Opus 5.5',
+        status: 'active',
+        capabilities: {
+          attachment: false,
+          reasoning: false,
+          toolCall: true,
+          structuredOutput: false,
+          input: new Set(['text', 'image']),
+          output: new Set(['text']),
+        },
+        limits: { context: 1_000_000, output: 0 },
+        variants: new Set(['low', 'high']),
+      },
+      {
+        providerID: 'openrouter',
+        modelID: 'anthropic/claude-haiku-5.5',
+        sourceID: 'anthropic/claude-haiku-5.5',
+        family: 'claude-haiku',
+        releaseDate: '2026-10-07',
+        cost: { bands: [{ fromContext: 0, price: { input: 0.1, output: 0.5 } }] },
+        variants: new Set(),
+      },
+    ]);
+    expect(catalogFromModels(undefined)).toEqual([]);
   });
 });
 
