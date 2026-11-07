@@ -1,4 +1,4 @@
-import type { Catalog, Model as ModelsDevModel } from '@opencode-ai/models/effect';
+import type { Catalog, Model as ModelsDevModel } from '@opencode-ai/models';
 import { compact, last, minBy, omit, uniqBy } from 'es-toolkit';
 
 import { canonicalIdentityOf, preservesCapabilities, resolveCanonicalID, sameGeneration } from './identity';

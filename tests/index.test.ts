@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import type { Catalog } from '@opencode-ai/models/effect';
+import type { Catalog } from '@opencode-ai/models';
 import type { Plugin, PluginInput } from '@opencode-ai/plugin';
 import { Effect, Option } from 'effect';
 

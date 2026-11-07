@@ -1,4 +1,4 @@
-import type { ModelCost } from '@opencode-ai/models/effect';
+import type { ModelCost } from '@opencode-ai/models';
 import { compact, median as calculateMedian, uniq } from 'es-toolkit';
 
 import type { CostEstimate, ModelProfile, PriceBand, PriceSchedule, TokenPrice } from './types';

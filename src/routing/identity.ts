@@ -1,4 +1,4 @@
-import type { Catalog, ModelMetadata } from '@opencode-ai/models/effect';
+import type { Catalog, ModelMetadata } from '@opencode-ai/models';
 import { regex } from 'arkregex';
 import { uniq } from 'es-toolkit';
 

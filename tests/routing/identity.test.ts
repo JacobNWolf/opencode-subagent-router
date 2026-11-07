@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import type { Catalog, ModelFamily, ModelMetadata } from '@opencode-ai/models/effect';
+import type { Catalog, ModelFamily, ModelMetadata } from '@opencode-ai/models';
 
 import {
   canonicalIdentityOf,

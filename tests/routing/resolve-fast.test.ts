@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import type { Catalog, Model, ModelCost, ModelFamily, ModelMetadata } from '@opencode-ai/models/effect';
+import type { Catalog, Model, ModelCost, ModelFamily, ModelMetadata } from '@opencode-ai/models';
 import { omit } from 'es-toolkit';
 
 import { matchRoute, resolveFast, resolveFastDecision } from '../../src/routing/resolve-fast';
