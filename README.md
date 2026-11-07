@@ -12,18 +12,22 @@ It never upgrades a model, never overrides a subagent that already has an explic
 
 ## Install
 
-Add the plugin to `opencode.json`:
+The same package runs on OpenCode V2 and V1. Add it to `opencode.json`:
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["@jacobwolf/opencode-subagent-router"]
+  "plugins": ["@jacobwolf/opencode-subagent-router"]
 }
 ```
 
+On V1, use the `plugin` key instead of `plugins`.
+
 Jev runs on OpenRouter. The router reads `OPENROUTER_API_KEY`, then `$XDG_DATA_HOME/opencode/auth.json` (or `~/.local/share/opencode/auth.json`) for `openrouter.key`.
 
-A keep-parent result shows a warning toast. Every outcome is logged under the `jev-router` service.
+Every outcome is logged under the `jev-router` service in the OpenCode server log. On V1, a keep-parent result also shows a warning toast.
+
+On V2, the router fills the `subagent` tool's `model` before the child session starts. It skips follow-ups to an existing subagent and tasks whose call or agent already sets a model.
 
 ## How a fast target is chosen
 
@@ -44,10 +48,10 @@ Optional overrides remain the escape hatch when metadata is incomplete:
 
 ```json
 {
-  "plugin": [
-    [
-      "@jacobwolf/opencode-subagent-router",
-      {
+  "plugins": [
+    {
+      "package": "@jacobwolf/opencode-subagent-router",
+      "options": {
         "timeoutMs": 2000,
         "confidenceMin": 0.5,
         "routes": [
@@ -62,10 +66,12 @@ Optional overrides remain the escape hatch when metadata is incomplete:
           }
         ]
       }
-    ]
+    }
   ]
 }
 ```
+
+On V1, pass the same options as `"plugin": [["@jacobwolf/opencode-subagent-router", { ... }]]`.
 
 Routes use `provider/model` identifiers. The last matching route wins. Omitting `parent.variant` matches every variant of that parent model.
 

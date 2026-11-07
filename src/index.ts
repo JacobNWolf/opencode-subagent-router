@@ -1,4 +1,5 @@
 import type { Plugin, PluginInput, PluginOptions } from '@opencode-ai/plugin';
+import type { Agent, Plugin as V2 } from '@opencode/plugin/effect';
 import { Cause, Effect, Option } from 'effect';
 
 import { decide } from './decide';
@@ -7,9 +8,23 @@ import { askJev } from './jev';
 import { loadModelMetadata } from './models-dev';
 import { resolveFastDecision, type ModelRef } from './routing/resolve-fast';
 import type { EnabledModel } from './routing/types';
-import { catalogFromProviders, getOpenRouterApiKey, latestAssistantModel, parseOptions } from './runtime';
+import {
+  catalogFromModels,
+  catalogFromProviders,
+  getOpenRouterApiKey,
+  latestAssistantModel,
+  parseOptions,
+  type RouterOptions,
+} from './runtime';
 
+const ID = 'opencode-subagent-router';
 const SERVICE = 'jev-router';
+
+type Log = (
+  level: 'debug' | 'info' | 'warn' | 'error',
+  message: string,
+  extra?: Readonly<Record<string, unknown>>,
+) => Effect.Effect<void>;
 
 export type RouterDependencies = {
   readonly ask: typeof askJev;
@@ -19,10 +34,24 @@ export type RouterDependencies = {
 };
 
 const loadCatalog: RouterDependencies['loadCatalog'] = (client) =>
+  openCodeRequest('config.providers', () => client.config.providers()).pipe(
+    Effect.map((response) => catalogFromProviders(response.data?.providers)),
+  );
+
+function withDefaults(overrides: Partial<RouterDependencies>): RouterDependencies {
+  return {
+    ask: overrides.ask ?? askJev,
+    apiKey: overrides.apiKey ?? getOpenRouterApiKey,
+    loadCatalog: overrides.loadCatalog ?? loadCatalog,
+    loadModelMetadata: overrides.loadModelMetadata ?? loadModelMetadata,
+  };
+}
+
+const openCodeRequest = <A>(operation: string, request: () => Promise<A>): Effect.Effect<A, OpenCodeError> =>
   Effect.tryPromise({
-    try: () => client.config.providers(),
-    catch: (cause) => openCodeError('config.providers', cause),
-  }).pipe(Effect.map((response) => catalogFromProviders(response.data?.providers)));
+    try: request,
+    catch: (cause) => openCodeError(operation, cause),
+  });
 
 function sameModel(left: ModelRef, right: ModelRef): boolean {
   return (
@@ -32,61 +61,102 @@ function sameModel(left: ModelRef, right: ModelRef): boolean {
   );
 }
 
+/**
+ * Shared by the V1 and V2 entrypoints: picks a fast target for a direct child task, then asks Jev whether the task
+ * can take it. Returns nothing when the parent should be kept without asking.
+ */
+function makeRouter(
+  dependencies: RouterDependencies,
+  options: RouterOptions,
+  log: Log,
+  catalogLoad: Effect.Effect<readonly EnabledModel[], OpenCodeError>,
+) {
+  const getCatalog = Effect.runSync(
+    Effect.cached(
+      withOperationTimeout(catalogLoad, 'catalog_load', options.timeoutMs).pipe(
+        Effect.catchCause((cause) =>
+          log('warn', 'catalog_load_failed', { error: Cause.pretty(cause) }).pipe(
+            Effect.map((): readonly EnabledModel[] => []),
+          ),
+        ),
+      ),
+    ),
+  );
+  const getModelMetadata = Effect.runSync(
+    Effect.cached(
+      dependencies
+        .loadModelMetadata(options.timeoutMs)
+        .pipe(
+          Effect.catchCause((cause) =>
+            log('warn', 'model_metadata_load_failed', { error: Cause.pretty(cause) }).pipe(Effect.as(undefined)),
+          ),
+        ),
+    ),
+  );
+  const getApiKey = Effect.runSync(Effect.cached(dependencies.apiKey()));
+
+  return (parent: ModelRef, task: { readonly agent?: string | undefined; readonly prompt: string }) =>
+    Effect.gen(function* () {
+      const [catalog, modelsDev] = yield* Effect.all([getCatalog, getModelMetadata], { concurrency: 2 });
+      const resolution = resolveFastDecision(parent, catalog, {
+        routes: options.routes,
+        ...(modelsDev === undefined ? {} : { modelsDev }),
+      });
+
+      const fast = resolution.target;
+      if (!fast) {
+        yield* log('debug', 'no_fast_target', { parent, reason: resolution.reason });
+        return undefined;
+      }
+
+      const apiKey = yield* getApiKey;
+      if (Option.isNone(apiKey)) {
+        yield* log('warn', 'missing_openrouter_api_key');
+        return undefined;
+      }
+
+      const answers = yield* dependencies.ask({
+        apiKey: apiKey.value,
+        state: {
+          ...(task.agent === undefined ? {} : { subagent_type: task.agent }),
+          prompt: task.prompt,
+        },
+        timeoutMs: options.timeoutMs,
+      });
+
+      const verdict = decide(answers, options.confidenceMin);
+      yield* log('info', verdict.reason, {
+        answers,
+        fast,
+        parent,
+        routing: { reason: resolution.reason, ...resolution.details },
+      });
+      return { fast, verdict };
+    });
+}
+
+/** V1 entrypoint: rewrites the child's first message model in `chat.message`. */
 export function createServer(overrides: Partial<RouterDependencies> = {}): Plugin {
-  const dependencies: RouterDependencies = {
-    ask: overrides.ask ?? askJev,
-    apiKey: overrides.apiKey ?? getOpenRouterApiKey,
-    loadCatalog: overrides.loadCatalog ?? loadCatalog,
-    loadModelMetadata: overrides.loadModelMetadata ?? loadModelMetadata,
-  };
+  const dependencies = withDefaults(overrides);
 
   return ({ client }, rawOptions?: PluginOptions) => {
     const options = parseOptions(rawOptions);
-    const log = (
-      level: 'debug' | 'info' | 'warn' | 'error',
-      message: string,
-      extra?: Readonly<Record<string, unknown>>,
-    ): Effect.Effect<void> =>
-      Effect.tryPromise({
-        try: () =>
-          client.app.log({
-            body: {
-              service: SERVICE,
-              level,
-              message,
-              ...(extra === undefined ? {} : { extra }),
-            },
-          }),
-        catch: (cause) => openCodeError('app.log', cause),
-      }).pipe(Effect.asVoid, Effect.ignoreCause);
-
-    const catalogLoad = withOperationTimeout(dependencies.loadCatalog(client), 'catalog_load', options.timeoutMs).pipe(
-      Effect.catchCause((cause) =>
-        log('warn', 'catalog_load_failed', { error: Cause.pretty(cause) }).pipe(
-          Effect.map((): readonly EnabledModel[] => []),
-        ),
-      ),
-    );
-    const getCatalog = Effect.runSync(Effect.cached(catalogLoad));
-    const metadataLoad = dependencies
-      .loadModelMetadata(options.timeoutMs)
-      .pipe(
-        Effect.catchCause((cause) =>
-          log('warn', 'model_metadata_load_failed', { error: Cause.pretty(cause) }).pipe(Effect.as(undefined)),
-        ),
-      );
-    const getModelMetadata = Effect.runSync(Effect.cached(metadataLoad));
-    const getApiKey = Effect.runSync(Effect.cached(dependencies.apiKey()));
-
-    const openCodeRequest = <A>(operation: string, request: () => Promise<A>): Effect.Effect<A, OpenCodeError> =>
-      Effect.tryPromise({
-        try: request,
-        catch: (cause) => openCodeError(operation, cause),
-      });
+    const log: Log = (level, message, extra) =>
+      openCodeRequest('app.log', () =>
+        client.app.log({
+          body: {
+            service: SERVICE,
+            level,
+            message,
+            ...(extra === undefined ? {} : { extra }),
+          },
+        }),
+      ).pipe(Effect.asVoid, Effect.ignoreCause);
+    const route = makeRouter(dependencies, options, log, dependencies.loadCatalog(client));
 
     return Promise.resolve({
       'chat.message': (input, output) => {
-        const route = Effect.gen(function* () {
+        const handle = Effect.gen(function* () {
           const childResponse = yield* openCodeRequest('session.get.child', () =>
             client.session.get({ path: { id: output.message.sessionID } }),
           );
@@ -127,60 +197,27 @@ export function createServer(overrides: Partial<RouterDependencies> = {}): Plugi
             return;
           }
 
-          const [catalog, modelsDev] = yield* Effect.all([getCatalog, getModelMetadata], { concurrency: 2 });
-          const resolution = resolveFastDecision(parentModel, catalog, {
-            routes: options.routes,
-            ...(modelsDev === undefined ? {} : { modelsDev }),
-          });
-
-          const fast = resolution.target;
-          if (!fast) {
-            yield* log('debug', 'no_fast_target', { parent: parentModel, reason: resolution.reason });
-            return;
-          }
-
-          const apiKey = yield* getApiKey;
-          if (Option.isNone(apiKey)) {
-            yield* log('warn', 'missing_openrouter_api_key');
-            return;
-          }
-
           const prompt = output.parts
             .filter((part) => part.type === 'text')
             .map((part) => part.text)
             .join('\n');
-          const answers = yield* dependencies.ask({
-            apiKey: apiKey.value,
-            state: {
-              ...(input.agent === undefined ? {} : { subagent_type: input.agent }),
-              prompt,
-            },
-            timeoutMs: options.timeoutMs,
-          });
+          const routed = yield* route(parentModel, { agent: input.agent, prompt });
+          if (!routed) return;
 
-          const verdict = decide(answers, options.confidenceMin);
-          yield* log('info', verdict.reason, {
-            answers,
-            fast,
-            parent: parentModel,
-            routing: { reason: resolution.reason, ...resolution.details },
-          });
-
-          if (verdict.action === 'keep') {
-            yield* Effect.tryPromise({
-              try: () =>
-                client.tui.showToast({
-                  body: {
-                    title: 'Subagent kept parent model',
-                    message: `${input.agent ?? output.message.agent}: ${verdict.reason}`,
-                    variant: 'warning',
-                  },
-                }),
-              catch: (cause) => openCodeError('tui.showToast', cause),
-            }).pipe(Effect.asVoid, Effect.ignoreCause);
+          if (routed.verdict.action === 'keep') {
+            yield* openCodeRequest('tui.showToast', () =>
+              client.tui.showToast({
+                body: {
+                  title: 'Subagent kept parent model',
+                  message: `${input.agent ?? output.message.agent}: ${routed.verdict.reason}`,
+                  variant: 'warning',
+                },
+              }),
+            ).pipe(Effect.asVoid, Effect.ignoreCause);
             return;
           }
 
+          const { fast } = routed;
           yield* Effect.sync(() => {
             model.providerID = fast.providerID;
             model.modelID = fast.modelID;
@@ -189,12 +226,98 @@ export function createServer(overrides: Partial<RouterDependencies> = {}): Plugi
           });
         }).pipe(Effect.catchCause((cause) => log('warn', 'routing_failed', { error: Cause.pretty(cause) })));
 
-        return Effect.runPromise(route);
+        return Effect.runPromise(handle);
       },
     });
   };
 }
 
+type SubagentInput = {
+  agent: Agent.ID;
+  prompt: string;
+  model?: string;
+  sessionID?: string;
+};
+
+const LOGGERS = {
+  debug: Effect.logDebug,
+  info: Effect.logInfo,
+  warn: Effect.logWarning,
+  error: Effect.logError,
+} as const;
+
+/** Runs on the host's Effect runtime, so these land in OpenCode's server log. */
+const hostLog: Log = (level, message, extra) =>
+  LOGGERS[level](message).pipe(
+    Effect.annotateLogs({ service: SERVICE, ...(extra === undefined ? {} : { extra: JSON.stringify(extra) }) }),
+  );
+
+const hostRequest = <A>(operation: string, request: Effect.Effect<A, unknown>): Effect.Effect<A, OpenCodeError> =>
+  request.pipe(Effect.mapError((cause) => openCodeError(operation, cause)));
+
+/** V2 entrypoint: fills the `subagent` tool's `model` before OpenCode creates the child session. */
+export function createPlugin(overrides: Partial<RouterDependencies> = {}): V2.Plugin {
+  const dependencies = withDefaults(overrides);
+
+  return {
+    id: ID,
+    effect: (ctx) =>
+      Effect.gen(function* () {
+        const route = makeRouter(
+          dependencies,
+          parseOptions(ctx.options),
+          hostLog,
+          hostRequest('model.list', ctx.model.list()).pipe(Effect.map((response) => catalogFromModels(response.data))),
+        );
+
+        yield* ctx.tool.hook('execute.before', (event) => {
+          if (event.tool !== 'subagent') return Effect.void;
+          const input = event.input as SubagentInput;
+
+          return Effect.gen(function* () {
+            if (input.sessionID !== undefined) {
+              yield* hostLog('debug', 'follow_up');
+              return;
+            }
+            if (input.model !== undefined) {
+              yield* hostLog('info', 'pinned_model', { incoming: input.model });
+              return;
+            }
+
+            const caller = yield* hostRequest('session.get', ctx.session.get({ sessionID: event.sessionID }));
+            if (caller.parentID) {
+              yield* hostLog('debug', 'not_primary_child');
+              return;
+            }
+
+            const agent = yield* hostRequest('agent.get', ctx.agent.get({ agentID: input.agent }));
+            if (agent.data.model) {
+              yield* hostLog('info', 'pinned_model', { incoming: agent.data.model });
+              return;
+            }
+
+            if (!caller.model) {
+              yield* hostLog('warn', 'parent_model_unavailable');
+              return;
+            }
+            const parent: ModelRef = {
+              providerID: caller.model.providerID,
+              modelID: caller.model.id,
+              ...(caller.model.variant === undefined ? {} : { variant: caller.model.variant }),
+            };
+
+            const routed = yield* route(parent, { agent: input.agent, prompt: input.prompt });
+            if (routed?.verdict.action !== 'downgrade') return;
+
+            const { fast } = routed;
+            input.model = `${fast.providerID}/${fast.modelID}${fast.variant ? `#${fast.variant}` : ''}`;
+          }).pipe(Effect.catchCause((cause) => hostLog('warn', 'routing_failed', { error: Cause.pretty(cause) })));
+        });
+      }),
+  };
+}
+
 export const server = createServer();
 
-export default { id: 'opencode-subagent-router', server };
+/** V1 calls `server`; V2 reads `id` and `effect`. */
+export default { ...createPlugin(), server };
