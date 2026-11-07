@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import type { Modality } from '@opencode-ai/models/effect';
+import type { Modality } from '@opencode-ai/models';
 import { Effect, Option, Schema } from 'effect';
 import { compact, flatMap, isUndefined, omitBy } from 'es-toolkit';
 

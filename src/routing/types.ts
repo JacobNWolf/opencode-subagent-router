@@ -1,4 +1,4 @@
-import type { Catalog, Model as ModelsDevModel, ModelCost, Modality } from '@opencode-ai/models/effect';
+import type { Catalog, Model as ModelsDevModel, ModelCost, Modality } from '@opencode-ai/models';
 
 export type ModelRef = { readonly providerID: string; readonly modelID: string; readonly variant?: string };
 
