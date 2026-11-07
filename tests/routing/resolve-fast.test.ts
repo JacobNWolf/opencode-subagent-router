@@ -329,6 +329,31 @@ describe('resolveFast', () => {
     ).toEqual({ providerID: 'anthropic', modelID: 'claude-sonnet-5', variant: 'low' });
   });
 
+  test('routes Claude Agent aliases with subscription pricing to the cheapest same-generation model', () => {
+    const modelsDev = syntheticCatalog([
+      { canonicalID: 'anthropic/claude-fable-5-1', family: 'claude-fable', cost: { input: 10, output: 50 } },
+      { canonicalID: 'anthropic/claude-opus-5-5', family: 'claude-opus', cost: { input: 4, output: 20 } },
+      { canonicalID: 'anthropic/claude-haiku-5-5', family: 'claude-haiku', cost: { input: 0.1, output: 0.5 } },
+    ]);
+    for (const [id, name] of [
+      ['anthropic/claude-fable-5-1', 'Claude Fable 5.1'],
+      ['anthropic/claude-opus-5-5', 'Claude Opus 5.5'],
+      ['anthropic/claude-haiku-5-5', 'Claude Haiku 5.5'],
+    ] as const) {
+      modelsDev.models[id] = { ...modelsDev.models[id]!, name };
+    }
+    const agent = (modelID: string, name: string) =>
+      omit(enabledModel('claude-agent', modelID, baseSchedule(0, 0), { name }), ['cost', 'family', 'releaseDate']);
+    const enabled = [agent('fable', 'Fable 5.1'), agent('opus', 'Opus 5.5'), agent('haiku', 'Haiku 5.5')];
+
+    for (const modelID of ['fable', 'opus']) {
+      expect(resolveFastDecision({ providerID: 'claude-agent', modelID }, enabled, { modelsDev })).toEqual({
+        target: { providerID: 'claude-agent', modelID: 'haiku', variant: 'low' },
+        reason: 'same_generation_cheaper',
+      });
+    }
+  });
+
   test('does not select an older major generation', () => {
     const enabled = [
       enabledModel('acme', 'nebula-9-grand', baseSchedule(12, 48), { family: 'nebula-grand' }),
