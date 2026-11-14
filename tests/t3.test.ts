@@ -74,20 +74,19 @@ describe('V2 T3 delegation routing', () => {
     },
   );
 
-  test('writes a different model without embedding its variant in the model ID', async () => {
-    const fixture = await setupT3(routeTo({ model: 'openai/gpt-6-mini', variant: 'low' }));
-    expect(await fixture.run(t3Tool, t3Task())).toEqual(
-      t3Task({ target: { model: 'openai/gpt-6-mini', options: [low] } }),
-    );
-  });
-
-  test.each([{}, { options: [plan] }])(
-    'leaves options alone for a different model without a variant: %j',
-    async (target) => {
-      const fixture = await setupT3(routeTo({ model: 'openai/gpt-6-mini' }));
-      expect(await fixture.run(t3Tool, t3Task({ target }))).toEqual(
-        t3Task({ target: { ...target, model: 'openai/gpt-6-mini' } }),
-      );
+  test.each([{ model: 'openai/gpt-6-mini' }, { model: 'openai/gpt-6-mini', variant: 'low' }])(
+    'skips cross-model routing when inherited options are unknown: %j',
+    async (fast) => {
+      for (const variant of ['high', undefined]) {
+        for (const target of [undefined, {}, { options: [plan] }, { options: { agent: 'plan' } }]) {
+          const fixture = await setupT3({
+            ...routeTo(fast),
+            caller: { model: { providerID: 'openai', id: 'gpt-6.1-sol', ...(variant ? { variant } : {}) } },
+          });
+          await expectUnchanged(fixture, t3Task(target === undefined ? {} : { target }));
+          expect(fixture.logs.at(-1)).toBe('inherited_options');
+        }
+      }
     },
   );
 

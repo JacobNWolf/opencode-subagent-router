@@ -34,7 +34,12 @@ const decodeInput = Schema.decodeUnknownOption(
 
 type Skip = {
   readonly level: 'info' | 'warn';
-  readonly skip: 'invalid_delegation_input' | 'unsupported_target' | 'pinned_model' | 'inherited_variant';
+  readonly skip:
+    | 'invalid_delegation_input'
+    | 'unsupported_target'
+    | 'pinned_model'
+    | 'inherited_variant'
+    | 'inherited_options';
 };
 
 type T3Delegation =
@@ -76,15 +81,20 @@ export function readT3Delegation(input: unknown): T3Delegation {
   return {
     task: { agent: delegation.role, prompt: delegation.task },
     apply: (fast, parent) => {
-      // T3 inherits the parent's options only on the parent's model. Clearing the variant there takes `[]`,
-      // which would also drop the inherited `agent` (e.g. plan).
+      // T3 merges explicit options with inherited ones only on the same model.
+      // The OpenCode session does not expose T3's full option set to carry across models.
       const sameModel = fast.providerID === parent.providerID && fast.modelID === parent.modelID;
-      if (fast.variant === undefined && sameModel) return { level: 'info', skip: 'inherited_variant' };
+      if (!sameModel) return { level: 'info', skip: 'inherited_options' };
+
+      // Clearing the inherited variant takes `[]`, which would also drop the inherited `agent` (e.g. plan).
+      if (fast.variant === undefined) return { level: 'info', skip: 'inherited_variant' };
 
       const raw = input as { target?: Record<string, unknown> };
-      raw.target = { ...raw.target, model: `${fast.providerID}/${fast.modelID}` };
-
-      if (fast.variant !== undefined) raw.target.options = [...selections, { id: 'variant', value: fast.variant }];
+      raw.target = {
+        ...raw.target,
+        model: `${fast.providerID}/${fast.modelID}`,
+        options: [...selections, { id: 'variant', value: fast.variant }],
+      };
 
       return undefined;
     },
