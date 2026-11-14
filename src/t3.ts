@@ -10,6 +10,8 @@ const DELEGATE_TOOL = regex.as<string, { flags: 'i' }>(
 );
 
 const OptionValue = Schema.Union([Schema.String, Schema.Boolean, Schema.Finite]);
+type Selection = { id: string; value: typeof OptionValue.Type };
+
 const decodeInput = Schema.decodeUnknownOption(
   Schema.Struct({
     task: Schema.String,
@@ -34,12 +36,7 @@ const decodeInput = Schema.decodeUnknownOption(
 
 type Skip = {
   readonly level: 'info' | 'warn';
-  readonly skip:
-    | 'invalid_delegation_input'
-    | 'unsupported_target'
-    | 'pinned_model'
-    | 'inherited_variant'
-    | 'inherited_options';
+  readonly skip: 'invalid_delegation_input' | 'unsupported_target' | 'pinned_model' | 'inherited_variant';
 };
 
 type T3Delegation =
@@ -51,6 +48,11 @@ type T3Delegation =
     };
 
 export const isT3DelegateTool = (tool: string) => DELEGATE_TOOL.test(tool);
+
+function optionsWithVariant(selections: Selection[], variant?: string): Selection[] {
+  if (variant === undefined) return selections;
+  return [...selections, { id: 'variant', value: variant }];
+}
 
 export function readT3Delegation(input: unknown): T3Delegation {
   const delegation = Option.getOrUndefined(decodeInput(input));
@@ -81,19 +83,17 @@ export function readT3Delegation(input: unknown): T3Delegation {
   return {
     task: { agent: delegation.role, prompt: delegation.task },
     apply: (fast, parent) => {
-      // T3 merges explicit options with inherited ones only on the same model.
-      // The OpenCode session does not expose T3's full option set to carry across models.
+      // T3's OpenCode V2 adapter only reads `variant`; cross-model switches do not lose other provider settings.
       const sameModel = fast.providerID === parent.providerID && fast.modelID === parent.modelID;
-      if (!sameModel) return { level: 'info', skip: 'inherited_options' };
 
-      // Clearing the inherited variant takes `[]`, which would also drop the inherited `agent` (e.g. plan).
-      if (fast.variant === undefined) return { level: 'info', skip: 'inherited_variant' };
+      // Same-model inheritance cannot clear just the variant without discarding other inherited options.
+      if (sameModel && fast.variant === undefined) return { level: 'info', skip: 'inherited_variant' };
 
       const raw = input as { target?: Record<string, unknown> };
       raw.target = {
         ...raw.target,
         model: `${fast.providerID}/${fast.modelID}`,
-        options: [...selections, { id: 'variant', value: fast.variant }],
+        options: optionsWithVariant(selections, fast.variant),
       };
 
       return undefined;

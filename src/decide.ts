@@ -9,6 +9,11 @@ const HARD_SCORE = 1.5;
 const KEEP_NOUL = 0.55;
 const STEP_UP_NOUL = 0.35;
 
+function reasoningBand(answers: JevAnswers, rungCount: number): number {
+  if (answers.kind.choice === 'research') return 0;
+  return Math.floor((answers.reasoning.score * rungCount) / HARD_SCORE);
+}
+
 export function decide(answers: JevAnswers, rungCount: number, confidenceMin = 0.5): Verdict {
   if (answers.kind.confidence < confidenceMin) {
     return { action: 'keep', reason: 'low_confidence' };
@@ -22,7 +27,7 @@ export function decide(answers: JevAnswers, rungCount: number, confidenceMin = 0
     return { action: 'keep', reason: 'hard_task' };
   }
 
-  const band = Math.floor((answers.reasoning.score * rungCount) / HARD_SCORE);
+  const band = reasoningBand(answers, rungCount);
   const stepUp = answers.keep_parent.noul >= STEP_UP_NOUL ? 1 : 0;
   return { action: 'downgrade', reason: 'cheap_task', rung: Math.min(rungCount - 1, band + stepUp) };
 }
