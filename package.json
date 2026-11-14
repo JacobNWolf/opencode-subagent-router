@@ -14,7 +14,11 @@
     "type": "git",
     "url": "https://github.com/JacobNWolf/opencode-subagent-router.git"
   },
+  "bin": {
+    "opencode-subagent-router": "./bin/install.mjs"
+  },
   "files": [
+    "bin",
     "src",
     "README.md",
     "LICENSE"
@@ -42,7 +46,8 @@
     "@opencode-ai/models": "^0.0.87",
     "arkregex": "^0.0.10",
     "effect": "4.1.0",
-    "es-toolkit": "^1.52.0"
+    "es-toolkit": "^1.52.0",
+    "jsonc-morph": "^0.4.0"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "1.18.31",
@@ -54,6 +59,7 @@
     "typescript": "^7"
   },
   "engines": {
+    "node": ">=20",
     "opencode": ">=1.18.31"
   }
 }

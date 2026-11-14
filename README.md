@@ -12,7 +12,33 @@ It never upgrades a model, never overrides a subagent that already has an explic
 
 ## Install
 
-The same package runs on OpenCode V2 and V1. Add it to `opencode.json`:
+The same package runs on OpenCode V2 and V1. With Node.js 20 or newer:
+
+```bash
+npx @jacobwolf/opencode-subagent-router@latest install
+```
+
+The installer detects `opencode --version` and adds the package to `plugins` (V2) or `plugin` (V1).
+It uses `OPENCODE_CONFIG` when set, otherwise the global config under `$XDG_CONFIG_HOME/opencode`
+(default `~/.config/opencode`). Existing `opencode.jsonc` is preferred over `opencode.json`.
+Comments and unrelated settings are preserved, an existing file is backed up before changes,
+and re-running does not add duplicate entries. OpenCode downloads the plugin itself; nothing
+is linked to npx's temporary cache.
+
+```bash
+# Current project only
+npx @jacobwolf/opencode-subagent-router@latest install --project
+
+# Preview without changing files
+npx @jacobwolf/opencode-subagent-router@latest install --dry-run
+
+# Explicit config and version, if OpenCode is not on PATH
+npx @jacobwolf/opencode-subagent-router@latest install --config ./opencode.jsonc --opencode-version 2
+```
+
+On V2, configuration reloads automatically; use `/reload` if needed. On V1, restart OpenCode.
+
+Alternatively, add it to `opencode.json` manually:
 
 ```json
 {
