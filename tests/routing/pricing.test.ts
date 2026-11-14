@@ -150,6 +150,11 @@ describe('cheapestChain', () => {
     expect(cheapestChain([profile('a', estimate(1, 4)), profile('b', estimate(1, 4))], 100_000)).toEqual([]);
   });
 
+  test('rejects repeated references to the same candidate as an ambiguous floor', () => {
+    const candidate = profile('small', estimate(1, 4));
+    expect(cheapestChain([candidate, candidate], 100_000)).toEqual([]);
+  });
+
   test('compares tiers only up to the parent context', () => {
     const tiered = (modelID: string, input: number, over: number) =>
       profile(modelID, {
