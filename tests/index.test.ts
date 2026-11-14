@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import type { Catalog } from '@opencode-ai/models';
 import type { Plugin, PluginInput } from '@opencode-ai/plugin';
 import { Effect, Option } from 'effect';
+import { keyBy } from 'es-toolkit';
 
 import { openCodeError } from '../src/errors';
 import { createServer, server } from '../src/index';
@@ -78,12 +79,12 @@ function input(variant: string | undefined = 'high', agent: string | undefined =
   return { sessionID: 'child', agent, variant } as never;
 }
 
-function output(modelID = 'sol', variant: string | undefined = 'high') {
+function output(modelID = 'sol', variant: string | undefined = 'high', providerID = 'openai') {
   return {
     message: {
       sessionID: 'child',
       agent: 'fallback-agent',
-      model: { providerID: 'openai', modelID, ...(variant ? { variant } : {}) },
+      model: { providerID, modelID, ...(variant ? { variant } : {}) },
     },
     parts: [
       { type: 'text', text: 'find files' },
@@ -120,6 +121,91 @@ function variantCatalog(): EnabledModel[] {
       variants: new Set(['low', 'high']),
     },
   ];
+}
+
+function nebulaFixture(tiers: readonly (readonly [tier: string, input: number, output: number])[]) {
+  const capabilities = {
+    attachment: true,
+    reasoning: true,
+    toolCall: true,
+    structuredOutput: true,
+    input: new Set(['text'] as const),
+    output: new Set(['text'] as const),
+  };
+  const id = (tier: string) => `nebula-9-${tier}`;
+
+  const catalog: EnabledModel[] = tiers.map(([tier, input, output]) => ({
+    providerID: 'acme',
+    modelID: id(tier),
+    sourceID: id(tier),
+    name: id(tier),
+    family: `nebula-${tier}`,
+    releaseDate: '2030-01-01',
+    cost: { bands: [{ fromContext: 0, price: { input, output } }] },
+    capabilities,
+    limits: { context: 100_000, output: 16_000 },
+    variants: new Set(['low', 'high']),
+  }));
+
+  const metadata = {
+    models: keyBy(
+      tiers.map(([tier]) => ({
+        id: `acme/${id(tier)}`,
+        name: id(tier),
+        description: tier,
+        family: `nebula-${tier}`,
+        release_date: '2030-01-01',
+        limit: { context: 100_000 },
+      })),
+      (model) => model.id,
+    ),
+    providers: {
+      acme: {
+        id: 'acme',
+        env: [],
+        npm: 'none',
+        name: 'acme',
+        doc: 'https://example.test',
+        models: keyBy(
+          tiers.map(([tier, input, output]) => ({
+            id: id(tier),
+            name: id(tier),
+            description: tier,
+            family: `nebula-${tier}`,
+            attachment: true,
+            reasoning: true,
+            tool_call: true,
+            structured_output: true,
+            release_date: '2030-01-01',
+            last_updated: '2030-01-01',
+            modalities: { input: ['text'], output: ['text'] },
+            open_weights: false,
+            limit: { context: 100_000, output: 16_000 },
+            cost: { input, output },
+          })),
+          (model) => model.id,
+        ),
+      },
+    },
+  } as unknown as Catalog;
+
+  const setup = {
+    child: { id: 'child', parentID: 'parent' },
+    parent: { id: 'parent' },
+    messages: [
+      {
+        info: {
+          role: 'assistant',
+          providerID: 'acme',
+          modelID: id(tiers[0]![0]),
+          variant: 'high',
+          time: { created: 1 },
+        },
+      },
+    ],
+  };
+
+  return { catalog, metadata, setup };
 }
 
 async function hooksFor(
@@ -532,123 +618,13 @@ describe('chat.message routing', () => {
   });
 
   test('mutates a cross-model target and keeps the parent when Jev says the work is hard', async () => {
-    const capabilities = {
-      attachment: true,
-      reasoning: true,
-      toolCall: true,
-      structuredOutput: true,
-      input: new Set(['text'] as const),
-      output: new Set(['text'] as const),
-    };
-    const catalog: EnabledModel[] = [
-      {
-        providerID: 'acme',
-        modelID: 'nebula-9-grand',
-        sourceID: 'nebula-9-grand',
-        name: 'nebula-9-grand',
-        family: 'nebula-grand',
-        releaseDate: '2030-01-01',
-        cost: { bands: [{ fromContext: 0, price: { input: 12, output: 48 } }] },
-        capabilities,
-        limits: { context: 100_000, output: 16_000 },
-        variants: new Set(['low', 'high']),
-      },
-      {
-        providerID: 'acme',
-        modelID: 'nebula-9-small',
-        sourceID: 'nebula-9-small',
-        name: 'nebula-9-small',
-        family: 'nebula-small',
-        releaseDate: '2030-01-01',
-        cost: { bands: [{ fromContext: 0, price: { input: 1, output: 4 } }] },
-        capabilities,
-        limits: { context: 100_000, output: 16_000 },
-        variants: new Set(['low', 'high']),
-      },
-    ];
-    const metadata = {
-      models: {
-        'acme/nebula-9-grand': {
-          id: 'acme/nebula-9-grand',
-          name: 'nebula-9-grand',
-          description: 'grand',
-          family: 'nebula-grand',
-          release_date: '2030-01-01',
-          limit: { context: 100_000 },
-        },
-        'acme/nebula-9-small': {
-          id: 'acme/nebula-9-small',
-          name: 'nebula-9-small',
-          description: 'small',
-          family: 'nebula-small',
-          release_date: '2030-01-01',
-          limit: { context: 100_000 },
-        },
-      },
-      providers: {
-        acme: {
-          id: 'acme',
-          env: [],
-          npm: 'none',
-          name: 'acme',
-          doc: 'https://example.test',
-          models: {
-            'nebula-9-grand': {
-              id: 'nebula-9-grand',
-              name: 'nebula-9-grand',
-              description: 'grand',
-              family: 'nebula-grand',
-              attachment: true,
-              reasoning: true,
-              tool_call: true,
-              structured_output: true,
-              release_date: '2030-01-01',
-              last_updated: '2030-01-01',
-              modalities: { input: ['text'], output: ['text'] },
-              open_weights: false,
-              limit: { context: 100_000, output: 16_000 },
-              cost: { input: 12, output: 48 },
-            },
-            'nebula-9-small': {
-              id: 'nebula-9-small',
-              name: 'nebula-9-small',
-              description: 'small',
-              family: 'nebula-small',
-              attachment: true,
-              reasoning: true,
-              tool_call: true,
-              structured_output: true,
-              release_date: '2030-01-01',
-              last_updated: '2030-01-01',
-              modalities: { input: ['text'], output: ['text'] },
-              open_weights: false,
-              limit: { context: 100_000, output: 16_000 },
-              cost: { input: 1, output: 4 },
-            },
-          },
-        },
-      },
-    } as unknown as Catalog;
-
-    const setup = {
-      child: { id: 'child', parentID: 'parent' },
-      parent: { id: 'parent' },
-      messages: [
-        {
-          info: {
-            role: 'assistant',
-            providerID: 'acme',
-            modelID: 'nebula-9-grand',
-            variant: 'high',
-            time: { created: 1 },
-          },
-        },
-      ],
-    };
+    const { catalog, metadata, setup } = nebulaFixture([
+      ['grand', 12, 48],
+      ['small', 1, 4],
+    ]);
 
     const cheap = await hooksFor(setup, { key: 'key', catalog, metadata });
-    const routed = output('nebula-9-grand', 'high');
-    (routed as { message: { model: { providerID: string } } }).message.model.providerID = 'acme';
+    const routed = output('nebula-9-grand', 'high', 'acme');
     await cheap.hook(input(), routed);
     expect((routed as { message: { model: unknown } }).message.model).toEqual({
       providerID: 'acme',
@@ -657,14 +633,40 @@ describe('chat.message routing', () => {
     });
 
     const hard = await hooksFor(setup, { key: 'key', catalog, metadata, answers: hardAnswers });
-    const kept = output('nebula-9-grand', 'high');
-    (kept as { message: { model: { providerID: string } } }).message.model.providerID = 'acme';
+    const kept = output('nebula-9-grand', 'high', 'acme');
     await hard.hook(input(), kept);
     expect((kept as { message: { model: unknown } }).message.model).toEqual({
       providerID: 'acme',
       modelID: 'nebula-9-grand',
       variant: 'high',
     });
+  });
+
+  test('routes moderate work to the middle rung of a three-model generation', async () => {
+    const { catalog, metadata, setup } = nebulaFixture([
+      ['grand', 12, 48],
+      ['mid', 4, 16],
+      ['small', 1, 4],
+    ]);
+
+    for (const [score, expected] of [
+      [0.2, 'nebula-9-small'],
+      [1, 'nebula-9-mid'],
+    ] as const) {
+      const fixture = await hooksFor(setup, {
+        key: 'key',
+        catalog,
+        metadata,
+        answers: { ...cheapAnswers, reasoning: { type: 'score', score, confidence: 1 } },
+      });
+      const routed = output('nebula-9-grand', 'high', 'acme');
+      await fixture.hook(input(), routed);
+      expect((routed as { message: { model: unknown } }).message.model).toEqual({
+        providerID: 'acme',
+        modelID: expected,
+        variant: 'low',
+      });
+    }
   });
 });
 

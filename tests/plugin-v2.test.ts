@@ -177,4 +177,22 @@ describe('V2 subagent routing', () => {
     expect(await classifier.run('subagent', task())).toEqual(task());
     expect(classifier.logs.at(-1)).toBe('routing_failed');
   });
+
+  test('picks the middle rung of an explicit route ladder', async () => {
+    const routes = [
+      {
+        parent: { model: 'claude-agent/opus' },
+        fast: [
+          { model: 'claude-agent/haiku', variant: 'low' },
+          { model: 'claude-agent/sonnet', variant: 'low' },
+        ],
+      },
+    ];
+    const { run } = await setupPlugin({
+      key: 'key',
+      options: { routes },
+      answers: { ...cheapAnswers, reasoning: { type: 'score', score: 1, confidence: 1 } },
+    });
+    expect((await run('subagent', task())).model).toBe('claude-agent/sonnet#low');
+  });
 });

@@ -31,14 +31,15 @@ On V2, the router fills the `subagent` tool's `model` before the child session s
 
 ### Claude Agent
 
-OpenCode's Claude Agent provider (`claude-agent`), which uses a Claude subscription through the Agent SDK, works like any other provider. Its models (`opus`, `sonnet`, `haiku`, `fable`, and full IDs such as `claude-sonnet-5`) are matched to their Anthropic entries on Models.dev by ID or display name, and compared at Anthropic list prices because the subscription reports no cost. For example, `claude-agent/opus` routes cheap work to `claude-agent/haiku#low`.
+OpenCode's Claude Agent provider (`claude-agent`), which uses a Claude subscription through the Agent SDK, works like any other provider. Its models (`opus`, `sonnet`, `haiku`, `fable`, and full IDs such as `claude-sonnet-5`) are matched to their Anthropic entries on Models.dev by ID or display name, and compared at Anthropic list prices because the subscription reports no cost. For example, `claude-agent/fable` routes cheap work to `claude-agent/haiku#low` or `claude-agent/opus#low`.
 
 ## How a fast target is chosen
 
 The cheap model comes from OpenCode's enabled provider catalog, in this order:
 
 1. The last matching route override, if it changes the model or lowers effort.
-2. The cheapest compatible model in the same inferred lab generation.
+2. Every compatible, strictly cheaper model in the same inferred lab generation, cheapest first; models that can't be
+   ordered by price are skipped.
 3. The same model at `low` effort when the parent uses `high`, `xhigh`, or `max`.
 4. The cheapest eligible exact-family sibling.
 
@@ -46,7 +47,9 @@ Cross-model selection stays on the same enabled OpenCode provider. It infers lab
 
 A Models.dev network failure uses the package snapshot. If metadata is missing entirely, the router falls back to same-model `low` and the older exact-family rule.
 
-Jev is only called after a fast target exists. Search, mechanical edits, review, and bounded implementation can downgrade. Architecture, diagnosis, and anything that needs deep reasoning stay on the parent.
+Jev is only called after a fast target exists. Higher reasoning scores pick a more capable rung. Search, mechanical
+edits, review, and bounded implementation can downgrade. Architecture, diagnosis, and anything that needs deep reasoning
+stay on the parent.
 
 Optional overrides remain the escape hatch when metadata is incomplete:
 
@@ -64,9 +67,7 @@ Optional overrides remain the escape hatch when metadata is incomplete:
               "model": "anthropic/claude-fable-5.1",
               "variant": ["high", "max"]
             },
-            "fast": {
-              "model": "anthropic/claude-sonnet-4-6"
-            }
+            "fast": [{ "model": "anthropic/claude-haiku-5-5" }, { "model": "anthropic/claude-opus-5-5" }]
           }
         ]
       }
@@ -77,7 +78,8 @@ Optional overrides remain the escape hatch when metadata is incomplete:
 
 On V1, pass the same options as `"plugin": [["@jacobwolf/opencode-subagent-router", { ... }]]`.
 
-Routes use `provider/model` identifiers. The last matching route wins. Omitting `parent.variant` matches every variant of that parent model.
+Routes use `provider/model` identifiers. `fast` is one target, or a ladder ordered cheapest first; a single object still
+works. The last matching route wins. Omitting `parent.variant` matches every variant of that parent model.
 
 ## Contributing
 

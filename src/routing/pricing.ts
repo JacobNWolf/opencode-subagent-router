@@ -117,17 +117,25 @@ export function scheduleIsStrictlyCheaper(
   return foundStrictSaving;
 }
 
-export function uniqueCheapest(candidates: readonly ModelProfile[], maxContext: number): ModelProfile | undefined {
-  const winners = candidates.filter((candidate) =>
-    candidates.every(
-      (other) =>
-        other === candidate ||
-        (candidate.marketCost !== undefined &&
-          other.marketCost !== undefined &&
-          scheduleIsStrictlyCheaper(candidate.marketCost.schedule, other.marketCost.schedule, maxContext)),
-    ),
-  );
+/**
+ * Incomparable candidates are excluded, but an ambiguous cheapest price rejects the entire ladder.
+ */
+export function cheapestChain(candidates: readonly ModelProfile[], maxContext: number): ModelProfile[] {
+  const cheaper = (a: ModelProfile, b: ModelProfile) =>
+    a.marketCost !== undefined &&
+    b.marketCost !== undefined &&
+    a.enabled.cost !== undefined &&
+    b.enabled.cost !== undefined &&
+    scheduleIsStrictlyCheaper(a.marketCost.schedule, b.marketCost.schedule, maxContext) &&
+    scheduleIsStrictlyCheaper(a.enabled.cost, b.enabled.cost, maxContext);
 
-  if (winners.length !== 1) return undefined;
-  return winners[0];
+  const chain = candidates
+    .filter((candidate) =>
+      candidates.every((other) => other === candidate || cheaper(candidate, other) || cheaper(other, candidate)),
+    )
+    .toSorted((left, right) => Number(cheaper(right, left)) - Number(cheaper(left, right)));
+
+  const [floor] = chain;
+  if (!floor || candidates.filter((other) => cheaper(floor, other)).length !== candidates.length - 1) return [];
+  return chain;
 }

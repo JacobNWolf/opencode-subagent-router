@@ -4,8 +4,9 @@ import { join } from 'node:path';
 
 import type { Modality } from '@opencode-ai/models';
 import { Effect, Option, Schema } from 'effect';
-import { compact, flatMap, isUndefined, omitBy } from 'es-toolkit';
+import { compact as compactArray, flatMap } from 'es-toolkit';
 
+import { compact } from './compact';
 import { tokenPriceOf } from './routing/pricing';
 import type { EnabledModel, ModelCapabilities, ModelLimits, ModelRef, Route } from './routing/types';
 
@@ -76,15 +77,17 @@ type MessageSnapshot = {
   };
 };
 
+const RouteTargetSchema = Schema.Struct({
+  model: Schema.String,
+  variant: Schema.optionalKey(Schema.String),
+});
+
 const RouteSchema = Schema.Struct({
   parent: Schema.Struct({
     model: Schema.String,
     variant: Schema.optionalKey(Schema.Union([Schema.String, Schema.Array(Schema.String)])),
   }),
-  fast: Schema.Struct({
-    model: Schema.String,
-    variant: Schema.optionalKey(Schema.String),
-  }),
+  fast: Schema.Union([RouteTargetSchema, Schema.NonEmptyArray(RouteTargetSchema)]),
 });
 const PositiveNumber = Schema.Finite.check(Schema.isGreaterThan(0));
 const Probability = Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 1 }));
@@ -102,22 +105,9 @@ const decodeTimeout = Schema.decodeUnknownOption(PositiveNumber);
 const decodeConfidence = Schema.decodeUnknownOption(Probability);
 const decodeRoute = Schema.decodeUnknownOption(RouteSchema);
 
-type UndefinedKey<T> = {
-  [K in keyof T]-?: undefined extends T[K] ? K : never;
-}[keyof T];
-
-type CompactUndefined<T> = Omit<T, UndefinedKey<T>> &
-  Partial<{
-    [K in UndefinedKey<T>]: Exclude<T[K], undefined>;
-  }>;
-
-function compactUndefined<T extends Record<PropertyKey, unknown>>(value: T): CompactUndefined<T> {
-  return omitBy(value, isUndefined) as CompactUndefined<T>;
-}
-
 export function parseOptions(options?: Readonly<Record<string, unknown>>): RouterOptions {
   const routes = Array.isArray(options?.routes)
-    ? compact(options.routes.map((route) => Option.getOrUndefined(decodeRoute(route))))
+    ? compactArray(options.routes.map((route) => Option.getOrUndefined(decodeRoute(route))))
     : [];
 
   return {
@@ -185,7 +175,7 @@ function limitsOf(limit: SourceModel['limit']): ModelLimits | undefined {
   if (limit?.context === undefined || limit.output === undefined) return undefined;
   if (!Number.isFinite(limit.context) || !Number.isFinite(limit.output)) return undefined;
 
-  return compactUndefined({
+  return compact({
     context: limit.context,
     output: limit.output,
     input: limit.input,
@@ -200,7 +190,7 @@ export function catalogFromProviders(value: readonly SourceProvider[] | undefine
         output: rawModel.cost?.output ?? Number.NaN,
       });
 
-      return compactUndefined({
+      return compact({
         providerID: provider.id,
         modelID: selectableID,
         sourceID: rawModel.id,
@@ -242,15 +232,14 @@ export type CatalogModel = {
 function sourceModelOf(model: CatalogModel): SourceModel {
   const released = model.time?.released;
   const base = model.cost?.find((tier) => tier.tier === undefined);
-  return compactUndefined({
+  return compact({
     id: model.modelID,
     name: model.name,
     family: model.family,
     status: model.status,
     release_date: released ? new Date(released).toISOString().slice(0, 10) : undefined,
     tool_call: model.capabilities?.tools,
-    modalities:
-      model.capabilities && compactUndefined({ input: model.capabilities.input, output: model.capabilities.output }),
+    modalities: model.capabilities && compact({ input: model.capabilities.input, output: model.capabilities.output }),
     cost: base && { input: base.input, output: base.output },
     limit: model.limit,
     variants: Object.fromEntries((model.variants ?? []).map((variant) => [variant.id, variant])),
@@ -276,7 +265,7 @@ export function latestAssistantModel(value: readonly MessageSnapshot[] | undefin
     if (!latest || created >= latest.created) {
       latest = {
         created,
-        model: compactUndefined({
+        model: compact({
           providerID: info.providerID,
           modelID: info.modelID,
           variant: info.variant,

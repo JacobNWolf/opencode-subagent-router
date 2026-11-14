@@ -1,6 +1,7 @@
 import type { Catalog, Model as ModelsDevModel } from '@opencode-ai/models';
-import { compact, last, minBy, omit, uniqBy } from 'es-toolkit';
+import { compact as compactArray, minBy, omit, uniqBy } from 'es-toolkit';
 
+import { compact } from '../compact';
 import {
   canonicalIdentityOf,
   preservesCapabilities,
@@ -8,8 +9,17 @@ import {
   sameGeneration,
   upstreamProviderOf,
 } from './identity';
-import { marketCost, priceScheduleOf, scheduleIsStrictlyCheaper, uniqueCheapest } from './pricing';
-import type { CostEstimate, EnabledModel, ModelProfile, ModelRef, PriceSchedule, ResolveContext, Route } from './types';
+import { cheapestChain, marketCost, priceScheduleOf, scheduleIsStrictlyCheaper } from './pricing';
+import type {
+  CostEstimate,
+  EnabledModel,
+  ModelProfile,
+  ModelRef,
+  PriceSchedule,
+  ResolveContext,
+  Route,
+  RouteTarget,
+} from './types';
 
 export type { EnabledModel, ModelRef, ResolveContext, Route } from './types';
 
@@ -33,21 +43,23 @@ function variantMatches(routeVariant: string | readonly string[] | undefined, pa
   return routeVariant.includes(actual);
 }
 
-/** Last matching route wins. Omit `parent.variant` to match every variant of that model. */
-export function matchRoute(parent: ModelRef, routes: readonly Route[]): ModelRef | undefined {
-  const parentId = `${parent.providerID}/${parent.modelID}`;
-  return last(
-    compact(
-      routes.map((route): ModelRef | undefined => {
-        if (route.parent.model !== parentId || !variantMatches(route.parent.variant, parent.variant)) return undefined;
+function routeRung(target: RouteTarget): ModelRef | undefined {
+  const fast = parseModel(target.model);
+  if (!fast || target.variant === undefined) return fast;
+  return { ...fast, variant: target.variant };
+}
 
-        const fast = parseModel(route.fast.model);
-        if (!fast) return undefined;
-        if (route.fast.variant === undefined) return fast;
-        return { ...fast, variant: route.fast.variant };
-      }),
-    ),
-  );
+/** Last matching route with at least one parseable target wins. Omit `parent.variant` to match every variant. */
+export function matchRoute(parent: ModelRef, routes: readonly Route[]): readonly ModelRef[] {
+  const parentId = `${parent.providerID}/${parent.modelID}`;
+  for (const route of routes.toReversed()) {
+    if (route.parent.model !== parentId || !variantMatches(route.parent.variant, parent.variant)) continue;
+
+    const targets = 'model' in route.fast ? [route.fast] : route.fast;
+    const rungs = compactArray(targets.map(routeRung));
+    if (rungs.length > 0) return rungs;
+  }
+  return [];
 }
 
 function effortRank(value?: string): number {
@@ -78,7 +90,7 @@ function uniqueSourceModel(enabled: EnabledModel, catalog: Catalog): ModelsDevMo
   if (!provider) return undefined;
 
   const hits = uniqBy(
-    compact([provider.models[enabled.modelID], enabled.sourceID ? provider.models[enabled.sourceID] : undefined]),
+    compactArray([provider.models[enabled.modelID], enabled.sourceID ? provider.models[enabled.sourceID] : undefined]),
     (model) => model.id,
   );
 
@@ -187,12 +199,13 @@ function buildProfiles(enabledModels: readonly EnabledModel[], catalog: Catalog)
     const canonical = canonicalID ? canonicalIdentityOf(canonicalID, family) : undefined;
     const cost = actualCost(enabled, source);
     const marketEstimate = canonical ? market.get(canonical.id) : undefined;
-    return {
+
+    return compact({
       enabled: withActualCost(enabled, cost),
-      ...(source === undefined ? {} : { source }),
-      ...(canonical === undefined ? {} : { canonical }),
-      ...(marketEstimate === undefined ? {} : { marketCost: marketEstimate }),
-    };
+      source,
+      canonical,
+      marketCost: marketEstimate,
+    });
   });
 }
 
@@ -201,7 +214,7 @@ function parentUnresolved(parent: ModelProfile | undefined): Readonly<Record<str
 
   if (parent.source?.type === 'decision') return { crossModel: 'parent_decision_model' };
 
-  const missing = compact([
+  const missing = compactArray([
     parent.canonical ? undefined : 'canonical',
     parent.enabled.cost ? undefined : 'cost',
     parent.enabled.limits ? undefined : 'limits',
@@ -240,29 +253,69 @@ function candidateSkip(parent: ModelProfile, candidate: ModelProfile, parentRef:
   return undefined;
 }
 
+function releaseOf(profile: ModelProfile): string {
+  return profile.source?.release_date ?? profile.enabled.releaseDate ?? '';
+}
+
+function isSuperseded(candidate: ModelProfile, pool: readonly ModelProfile[]): boolean {
+  return pool.some(
+    (other) => other.canonical!.family === candidate.canonical!.family && releaseOf(other) > releaseOf(candidate),
+  );
+}
+
 function resolveCrossModel(
   parentRef: ModelRef,
   enabledModels: readonly EnabledModel[],
   catalog: Catalog,
 ): {
-  readonly target?: ModelRef;
+  readonly rungs: readonly ModelRef[];
+  readonly legacyModels?: readonly EnabledModel[];
   readonly details?: Readonly<Record<string, unknown>>;
 } {
   const profiles = buildProfiles(enabledModels, catalog);
   const parent = profiles.find((profile) => sameSelectableModel(profile.enabled, parentRef));
   const unresolved = parentUnresolved(parent);
-  if (unresolved || !parent) return { details: unresolved ?? { crossModel: 'parent_not_in_catalog' } };
+  if (unresolved || !parent) return { rungs: [], details: unresolved ?? { crossModel: 'parent_not_in_catalog' } };
 
-  const candidates = profiles.filter(
+  const eligible = profiles.filter(
     (candidate) =>
       candidateSkip(parent, candidate, parentRef) === undefined && !sameSelectableModel(candidate.enabled, parentRef),
   );
-  const target = uniqueCheapest(candidates, parent.enabled.limits!.context);
-  if (target) return { target: targetRef(target.enabled) };
 
-  return {
-    details: { crossModel: candidates.length === 0 ? 'no_eligible_candidate' : 'no_unique_cheapest' },
-  };
+  const pool = [parent, ...eligible];
+  const candidates = eligible.filter((candidate) => !isSuperseded(candidate, pool));
+
+  const chain = cheapestChain(candidates, parent.enabled.limits!.context);
+  if (chain.length === 0) {
+    const excluded = profiles.filter(
+      (profile) =>
+        candidateSkip(parent, profile, parentRef) === 'capabilities' ||
+        (eligible.includes(profile) && !candidates.includes(profile)),
+    );
+    const legacyModels = enabledModels.filter(
+      (model) => !excluded.some((profile) => sameSelectableModel(model, profile.enabled)),
+    );
+
+    return {
+      rungs: [],
+      legacyModels,
+      details: { crossModel: candidates.length === 0 ? 'no_eligible_candidate' : 'no_unique_cheapest' },
+    };
+  }
+
+  const superseded = eligible.length - candidates.length;
+  const dropped = candidates.length - chain.length;
+  const rungs = chain.map((candidate) => targetRef(candidate.enabled));
+  if (superseded === 0 && dropped === 0) return { rungs };
+
+  const details: Record<string, unknown> = {};
+  if (superseded > 0) details.superseded = superseded;
+  if (dropped > 0) {
+    details.crossModel = 'incomparable_candidates';
+    details.dropped = dropped;
+  }
+
+  return { rungs, details };
 }
 
 function resolveLowEffort(parent: ModelRef, enabledModels: readonly EnabledModel[]): ModelRef | undefined {
@@ -295,7 +348,8 @@ function resolveLegacySibling(parent: ModelRef, enabledModels: readonly EnabledM
 }
 
 export type FastResolution = {
-  readonly target?: ModelRef;
+  /** Cheapest first; empty when no fast target exists. */
+  readonly rungs: readonly ModelRef[];
   readonly reason:
     | 'explicit_route'
     | 'same_generation_cheaper'
@@ -310,44 +364,24 @@ export function resolveFastDecision(
   enabledModels: readonly EnabledModel[],
   context: ResolveContext = {},
 ): FastResolution {
-  const override = matchRoute(parent, context.routes ?? []);
-  if (override && isValidOverride(parent, override)) {
-    return { target: override, reason: 'explicit_route' };
-  }
+  const override = matchRoute(parent, context.routes ?? []).filter((rung) => isValidOverride(parent, rung));
+  if (override.length > 0) return { rungs: override, reason: 'explicit_route' };
 
   const crossModel = context.modelsDev
     ? resolveCrossModel(parent, enabledModels, context.modelsDev)
-    : { details: { crossModel: 'models_dev_unavailable' } };
-  if (crossModel.target) {
-    return {
-      target: crossModel.target,
-      reason: 'same_generation_cheaper',
-      ...(crossModel.details === undefined ? {} : { details: crossModel.details }),
-    };
+    : { rungs: [], legacyModels: enabledModels, details: { crossModel: 'models_dev_unavailable' } };
+  const details = crossModel.details === undefined ? {} : { details: crossModel.details };
+  if (crossModel.rungs.length > 0) {
+    return { rungs: crossModel.rungs, reason: 'same_generation_cheaper', ...details };
   }
 
   const lowEffort = resolveLowEffort(parent, enabledModels);
-  if (lowEffort) {
-    return {
-      target: lowEffort,
-      reason: 'same_model_low',
-      ...(crossModel.details === undefined ? {} : { details: crossModel.details }),
-    };
-  }
+  if (lowEffort) return { rungs: [lowEffort], reason: 'same_model_low', ...details };
 
-  const sibling = resolveLegacySibling(parent, enabledModels);
-  if (sibling) {
-    return {
-      target: sibling,
-      reason: 'exact_family_sibling',
-      ...(crossModel.details === undefined ? {} : { details: crossModel.details }),
-    };
-  }
+  const sibling = resolveLegacySibling(parent, crossModel.legacyModels ?? enabledModels);
+  if (sibling) return { rungs: [sibling], reason: 'exact_family_sibling', ...details };
 
-  return {
-    reason: 'no_fast_target',
-    ...(crossModel.details === undefined ? {} : { details: crossModel.details }),
-  };
+  return { rungs: [], reason: 'no_fast_target', ...details };
 }
 
 export function resolveFast(
@@ -355,5 +389,5 @@ export function resolveFast(
   enabledModels: readonly EnabledModel[],
   context: ResolveContext = {},
 ): ModelRef | undefined {
-  return resolveFastDecision(parent, enabledModels, context).target;
+  return resolveFastDecision(parent, enabledModels, context).rungs[0];
 }

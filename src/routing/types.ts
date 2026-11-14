@@ -2,9 +2,11 @@ import type { Catalog, Model as ModelsDevModel, ModelCost, Modality } from '@ope
 
 export type ModelRef = { readonly providerID: string; readonly modelID: string; readonly variant?: string };
 
+export type RouteTarget = { readonly model: string; readonly variant?: string };
+
 export type Route = {
   readonly parent: { readonly model: string; readonly variant?: string | readonly string[] };
-  readonly fast: { readonly model: string; readonly variant?: string };
+  readonly fast: RouteTarget | readonly RouteTarget[];
 };
 
 export type TokenPrice = Pick<ModelCost, 'input' | 'output'>;
@@ -61,6 +63,7 @@ export type CanonicalIdentity = {
   readonly id: string;
   readonly lab: string;
   readonly lineage: string;
+  readonly family: string;
   readonly generation: number;
 };
 
