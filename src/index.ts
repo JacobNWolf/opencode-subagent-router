@@ -16,6 +16,7 @@ import {
   parseOptions,
   type RouterOptions,
 } from './runtime';
+import { isT3DelegateTool, readT3Delegation } from './t3';
 
 const ID = 'opencode-subagent-router';
 const SERVICE = 'jev-router';
@@ -261,7 +262,6 @@ const hostLog: Log = (level, message, extra) =>
 const hostRequest = <A>(operation: string, request: Effect.Effect<A, unknown>): Effect.Effect<A, OpenCodeError> =>
   request.pipe(Effect.mapError((cause) => openCodeError(operation, cause)));
 
-/** V2 entrypoint: fills the `subagent` tool's `model` before OpenCode creates the child session. */
 export function createPlugin(overrides: Partial<RouterDependencies> = {}): V2.Plugin {
   const dependencies = withDefaults(overrides);
 
@@ -277,17 +277,28 @@ export function createPlugin(overrides: Partial<RouterDependencies> = {}): V2.Pl
         );
 
         yield* ctx.tool.hook('execute.before', (event) => {
-          if (event.tool !== 'subagent') return Effect.void;
+          const isT3 = isT3DelegateTool(event.tool);
+          if (event.tool !== 'subagent' && !isT3) return Effect.void;
+
           const input = event.input as SubagentInput;
 
           return Effect.gen(function* () {
-            if (input.sessionID !== undefined) {
-              yield* hostLog('debug', 'follow_up');
+            const t3 = isT3 ? readT3Delegation(event.input) : undefined;
+            if (t3 && 'skip' in t3) {
+              yield* hostLog(t3.level, t3.skip);
               return;
             }
-            if (input.model !== undefined) {
-              yield* hostLog('info', 'pinned_model', { incoming: input.model });
-              return;
+
+            if (!t3) {
+              if (input.sessionID !== undefined) {
+                yield* hostLog('debug', 'follow_up');
+                return;
+              }
+
+              if (input.model !== undefined) {
+                yield* hostLog('info', 'pinned_model', { incoming: input.model });
+                return;
+              }
             }
 
             const caller = yield* hostRequest('session.get', ctx.session.get({ sessionID: event.sessionID }));
@@ -296,28 +307,40 @@ export function createPlugin(overrides: Partial<RouterDependencies> = {}): V2.Pl
               return;
             }
 
-            const agent = yield* hostRequest('agent.get', ctx.agent.get({ agentID: input.agent }));
-            if (agent.data.model) {
-              yield* hostLog('info', 'pinned_model', { incoming: agent.data.model });
-              return;
+            if (!t3) {
+              const agent = yield* hostRequest('agent.get', ctx.agent.get({ agentID: input.agent }));
+              if (agent.data.model) {
+                yield* hostLog('info', 'pinned_model', { incoming: agent.data.model });
+                return;
+              }
             }
 
             if (!caller.model) {
               yield* hostLog('warn', 'parent_model_unavailable');
               return;
             }
+
             const parent: ModelRef = {
               providerID: caller.model.providerID,
               modelID: caller.model.id,
               ...(caller.model.variant === undefined ? {} : { variant: caller.model.variant }),
             };
 
-            const routed = yield* route(parent, { agent: input.agent, prompt: input.prompt });
+            const routed = yield* route(parent, t3?.task ?? { agent: input.agent, prompt: input.prompt });
             if (routed?.verdict.action !== 'downgrade') return;
 
             const { fast } = routed;
-            input.model = `${fast.providerID}/${fast.modelID}${fast.variant ? `#${fast.variant}` : ''}`;
-          }).pipe(Effect.catchCause((cause) => hostLog('warn', 'routing_failed', { error: Cause.pretty(cause) })));
+            if (!t3) {
+              input.model = `${fast.providerID}/${fast.modelID}${fast.variant ? `#${fast.variant}` : ''}`;
+              return;
+            }
+
+            const skipped = t3.apply(fast, parent);
+            if (skipped) yield* hostLog(skipped.level, skipped.skip);
+          }).pipe(
+            Effect.catchCause((cause) => hostLog('warn', 'routing_failed', { error: Cause.pretty(cause) })),
+            Effect.annotateLogs({ transport: isT3 ? 't3' : 'native' }),
+          );
         });
       }),
   };
