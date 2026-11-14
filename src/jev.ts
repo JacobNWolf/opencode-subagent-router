@@ -4,7 +4,15 @@ import { withOperationTimeout, type OperationTimeoutError } from './errors';
 
 const JEV_URL = 'https://openrouter.ai/api/alpha/decisions';
 const JEV_MODEL = 'typesafe/jev-1.13';
-const KIND_CHOICES = ['search', 'mechanical', 'review', 'implementation', 'architecture', 'diagnosis'] as const;
+const KIND_CHOICES = [
+  'search',
+  'research',
+  'mechanical',
+  'review',
+  'implementation',
+  'architecture',
+  'diagnosis',
+] as const;
 
 export const QUESTIONS = {
   kind: {
@@ -12,10 +20,11 @@ export const QUESTIONS = {
     instructions: 'What kind of coding-agent task is this?',
     criteria: {
       search: 'Find files, grep, quote existing code. No edits.',
+      research: 'Read code and explain or summarize what exists. No edits or design decisions.',
       mechanical: 'Rename, format, apply a stated patch, boilerplate.',
       review: 'Read diffs and report issues. No implementation.',
       implementation: 'Write or change behavior in a bounded way.',
-      architecture: 'Design across modules, APIs, or data models.',
+      architecture: 'Design or restructure across modules, APIs, or data models.',
       diagnosis: 'Hunt a subtle bug, race, or production failure.',
     },
   },
@@ -23,17 +32,17 @@ export const QUESTIONS = {
     type: 'score' as const,
     instructions: 'How much reasoning does this task need?',
     criteria: [
-      'Lookup or grep. A fast model is enough.',
-      'Focused coding in a known area.',
-      'Deep design or a subtle bug. Keep the parent model.',
+      'Lookup, grep, or reading and summarizing code. A fast model is enough.',
+      'Focused coding or tracing in a known area.',
+      'Deep design, cross-system analysis, or a subtle bug. Keep the parent model.',
     ],
   },
   keep_parent: {
     type: 'noul' as const,
-    instructions: 'This task is likely to fail or waste time on a faster, lower-reasoning coding model.',
+    instructions: 'This task requires judgment beyond reading code and reporting what it finds.',
     criteria: {
-      true: "Needs the parent model's reasoning.",
-      false: 'A faster, cheaper coding model should handle it.',
+      true: 'Needs design judgment, cross-system synthesis, root-cause debugging, or tradeoff decisions.',
+      false: 'Reading code and reporting findings, even thoroughly, or applying a clearly specified change.',
     },
   },
 };

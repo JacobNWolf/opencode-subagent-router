@@ -22,9 +22,17 @@ describe('decide', () => {
       action: 'keep',
       reason: 'low_confidence',
     });
-    expect(decide(answers({ reasoning: { type: 'score', score: 0, confidence: 0.4 } }), 1, 0.6).reason).toBe(
+    expect(decide(answers({ kind: { type: 'choice', choice: 'search', confidence: 0.55 } }), 1, 0.6).reason).toBe(
       'low_confidence',
     );
+  });
+
+  test('ignores score confidence, which collapses at the midpoint of the scale', () => {
+    expect(decide(answers({ reasoning: { type: 'score', score: 1, confidence: 0 } }), 1)).toEqual({
+      action: 'downgrade',
+      reason: 'cheap_task',
+      rung: 0,
+    });
   });
 
   test('keeps tasks with a high keep-parent probability', () => {
@@ -46,7 +54,15 @@ describe('decide', () => {
   });
 
   test('a single rung reproduces the binary verdict', () => {
-    const kinds = ['search', 'mechanical', 'review', 'implementation', 'architecture', 'diagnosis'] as const;
+    const kinds = [
+      'search',
+      'research',
+      'mechanical',
+      'review',
+      'implementation',
+      'architecture',
+      'diagnosis',
+    ] as const;
     for (const [choice, score, noul, confidence] of cartesianProduct(
       kinds,
       [0, 0.5, 0.75, 1, 1.49, 1.5, 2],
@@ -55,7 +71,7 @@ describe('decide', () => {
     )) {
       const input = answers({
         kind: { type: 'choice', choice, confidence },
-        reasoning: { type: 'score', score, confidence: 0.9 },
+        reasoning: { type: 'score', score, confidence: 0 },
         keep_parent: { type: 'noul', noul },
       });
 
