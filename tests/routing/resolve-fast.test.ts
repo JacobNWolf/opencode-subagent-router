@@ -701,6 +701,25 @@ describe('resolveFast', () => {
     });
   });
 
+  test('treats a same-price speed alias as one candidate and picks the base ID', () => {
+    const enabled = [
+      enabledModel('openai', 'gpt-6-sol', baseSchedule(2, 10), { family: 'gpt-sol' }),
+      enabledModel('openai', 'gpt-6-terra-fast', baseSchedule(1, 5), { family: 'gpt-terra', sourceID: 'gpt-6-terra' }),
+      enabledModel('openai', 'gpt-6-terra', baseSchedule(1, 5), { family: 'gpt-terra' }),
+    ];
+    const modelsDev = syntheticCatalog([
+      { canonicalID: 'openai/gpt-6-sol', family: 'gpt-sol', cost: { input: 2, output: 10 } },
+      { canonicalID: 'openai/gpt-6-terra', family: 'gpt-terra', cost: { input: 1, output: 5 } },
+    ]);
+
+    expect(
+      resolveFastDecision({ providerID: 'openai', modelID: 'gpt-6-sol', variant: 'high' }, enabled, { modelsDev }),
+    ).toEqual({
+      rungs: [{ providerID: 'openai', modelID: 'gpt-6-terra', variant: 'low' }],
+      reason: 'same_generation_cheaper',
+    });
+  });
+
   test('keeps explicit route order and drops invalid rungs', () => {
     const routes: Route[] = [
       {

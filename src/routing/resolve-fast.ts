@@ -1,5 +1,5 @@
 import type { Catalog, Model as ModelsDevModel } from '@opencode-ai/models';
-import { compact as compactArray, minBy, omit, uniqBy } from 'es-toolkit';
+import { compact as compactArray, isEqual, minBy, omit, sortBy, uniqBy, uniqWith } from 'es-toolkit';
 
 import { compact } from '../compact';
 import {
@@ -263,6 +263,20 @@ function isSuperseded(candidate: ModelProfile, pool: readonly ModelProfile[]): b
   );
 }
 
+function isBaseID(profile: ModelProfile): boolean {
+  return profile.canonical!.id.endsWith(`/${profile.enabled.modelID}`);
+}
+
+function collapseAliases(candidates: readonly ModelProfile[]): ModelProfile[] {
+  const preferred = sortBy(candidates, [(profile) => !isBaseID(profile), (profile) => profile.enabled.modelID.length]);
+
+  // Equal-price aliases fail the ladder's strict price ordering.
+  return uniqWith(
+    preferred,
+    (left, right) => left.canonical!.id === right.canonical!.id && isEqual(left.enabled.cost, right.enabled.cost),
+  );
+}
+
 function resolveCrossModel(
   parentRef: ModelRef,
   enabledModels: readonly EnabledModel[],
@@ -283,14 +297,15 @@ function resolveCrossModel(
   );
 
   const pool = [parent, ...eligible];
-  const candidates = eligible.filter((candidate) => !isSuperseded(candidate, pool));
+  const current = eligible.filter((candidate) => !isSuperseded(candidate, pool));
+  const candidates = collapseAliases(current);
 
   const chain = cheapestChain(candidates, parent.enabled.limits!.context);
   if (chain.length === 0) {
     const excluded = profiles.filter(
       (profile) =>
         candidateSkip(parent, profile, parentRef) === 'capabilities' ||
-        (eligible.includes(profile) && !candidates.includes(profile)),
+        (eligible.includes(profile) && !current.includes(profile)),
     );
     const legacyModels = enabledModels.filter(
       (model) => !excluded.some((profile) => sameSelectableModel(model, profile.enabled)),
@@ -303,7 +318,7 @@ function resolveCrossModel(
     };
   }
 
-  const superseded = eligible.length - candidates.length;
+  const superseded = eligible.length - current.length;
   const dropped = candidates.length - chain.length;
   const rungs = chain.map((candidate) => targetRef(candidate.enabled));
   if (superseded === 0 && dropped === 0) return { rungs };

@@ -92,6 +92,13 @@ describe('decide', () => {
     expect([0.49, 0.5, 0.99, 1].map((score) => rungOf(decide(at(score), 3)))).toEqual([0, 1, 1, 2]);
   });
 
+  test('starts research at the cheapest rung and still steps up on a keep-parent signal', () => {
+    const research = (score: number, noul: number) =>
+      rungOf(decide({ ...at(score, noul), kind: { type: 'choice', choice: 'research', confidence: 1 } }, 2));
+
+    expect([research(1.42, 0.23), research(1.42, 0.35), research(1.91, 0.1)]).toEqual([0, 1, 'hard_task']);
+  });
+
   test('steps up one rung on a moderate keep-parent signal, clamped to the top', () => {
     expect(rungOf(decide(at(0.2, 0.35), 2))).toBe(1);
     expect(rungOf(decide(at(1, 0.35), 2))).toBe(1);

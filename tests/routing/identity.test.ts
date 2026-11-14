@@ -210,6 +210,17 @@ describe('preservesCapabilities', () => {
     ).toBeFalse();
   });
 
+  test('accepts a smaller context down to a 200k floor', () => {
+    const wide = enabled('acme', 'wide', { capabilities: capabilities(), limits: limits({ context: 628_000 }) });
+    const at = (context: number) =>
+      preservesCapabilities(
+        wide,
+        enabled('acme', 'small', { capabilities: capabilities(), limits: limits({ context }) }),
+      );
+
+    expect([400_000, 200_000, 199_999].map(at)).toEqual([true, true, false]);
+  });
+
   test('rejects a missing parent image modality under the strict policy', () => {
     const imageParent = enabled('acme', 'vision', {
       capabilities: capabilities({ input: new Set(['text', 'image']) }),

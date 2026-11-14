@@ -75,16 +75,24 @@ describe('V2 T3 delegation routing', () => {
   );
 
   test.each([{ model: 'openai/gpt-6-mini' }, { model: 'openai/gpt-6-mini', variant: 'low' }])(
-    'skips cross-model routing when inherited options are unknown: %j',
+    'switches models with caller options and only the routed variant: %j',
     async (fast) => {
+      const routed = 'variant' in fast ? [low] : [];
       for (const variant of ['high', undefined]) {
-        for (const target of [undefined, {}, { options: [plan] }, { options: { agent: 'plan' } }]) {
+        for (const [target, options] of [
+          [undefined, routed],
+          [{}, routed],
+          [{ options: [plan] }, [plan, ...routed]],
+          [{ options: { agent: 'plan' } }, [plan, ...routed]],
+        ] as const) {
           const fixture = await setupT3({
             ...routeTo(fast),
             caller: { model: { providerID: 'openai', id: 'gpt-6.1-sol', ...(variant ? { variant } : {}) } },
           });
-          await expectUnchanged(fixture, t3Task(target === undefined ? {} : { target }));
-          expect(fixture.logs.at(-1)).toBe('inherited_options');
+          const input = t3Task(target === undefined ? {} : { target });
+          expect(await fixture.run(t3Tool, input)).toEqual(
+            t3Task({ target: { ...target, model: 'openai/gpt-6-mini', options } }),
+          );
         }
       }
     },

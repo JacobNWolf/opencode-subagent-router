@@ -153,6 +153,8 @@ function isSubset<T>(required: ReadonlySet<T>, available: ReadonlySet<T>): boole
   return true;
 }
 
+const MIN_SUBAGENT_CONTEXT = 200_000;
+
 export function preservesCapabilities(parent: EnabledModel, candidate: EnabledModel): boolean {
   const parentCapabilities = parent.capabilities;
   const candidateCapabilities = candidate.capabilities;
@@ -171,7 +173,8 @@ export function preservesCapabilities(parent: EnabledModel, candidate: EnabledMo
   if (parentCapabilities.attachment && !candidateCapabilities.attachment) return false;
   if (parentCapabilities.structuredOutput && !candidateCapabilities.structuredOutput) return false;
 
-  if (candidateLimits.context < parentLimits.context) return false;
+  // A subagent starts with an empty context, so it needs working room rather than the parent's full window.
+  if (candidateLimits.context < Math.min(parentLimits.context, MIN_SUBAGENT_CONTEXT)) return false;
   if (candidateLimits.output < parentLimits.output) return false;
 
   return true;

@@ -69,11 +69,12 @@ The cheap model comes from OpenCode's enabled provider catalog, in this order:
 3. The same model at `low` effort when the parent uses `high`, `xhigh`, or `max`.
 4. The cheapest eligible exact-family sibling.
 
-Cross-model selection stays on the same enabled OpenCode provider. It infers lab, lineage, and major version from Models.dev metadata rather than a table of model names. Input and output prices must be no higher at every compared context tier, with at least one price strictly lower, and the candidate must preserve the parent's agent-critical capabilities and limits. OpenCode subscription or other non-list rates fall back to Models.dev list prices instead of disabling this step. Ambiguous identity or cost data disables only this step.
+Cross-model selection stays on the same enabled OpenCode provider. It infers lab, lineage, and major version from Models.dev metadata rather than a table of model names. Input and output prices must be no higher at every compared context tier, with at least one price strictly lower, and the candidate must preserve the parent's agent-critical capabilities and output limit. Because a subagent starts with an empty context, its context window only needs to reach the parent's or 200k tokens, whichever is smaller. Same-price aliases of one model, such as `-fast` speed tiers, count as one candidate. OpenCode subscription or other non-list rates fall back to Models.dev list prices instead of disabling this step. Ambiguous identity or cost data disables only this step.
 
 A Models.dev network failure uses the package snapshot. If metadata is missing entirely, the router falls back to same-model `low` and the older exact-family rule.
 
-Jev is only called after a fast target exists. Higher reasoning scores pick a more capable rung. Search, mechanical
+Jev is only called after a fast target exists. Higher reasoning scores pick a more capable rung, except read-only
+research, which starts at the cheapest rung. Search, mechanical
 edits, review, and bounded implementation can downgrade. Architecture, diagnosis, and anything that needs deep reasoning
 stay on the parent.
 
