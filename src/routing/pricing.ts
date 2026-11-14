@@ -124,17 +124,16 @@ export function cheapestChain(candidates: readonly ModelProfile[], maxContext: n
   const cheaper = (a: ModelProfile, b: ModelProfile) =>
     a.marketCost !== undefined &&
     b.marketCost !== undefined &&
-    scheduleIsStrictlyCheaper(a.marketCost.schedule, b.marketCost.schedule, maxContext);
+    a.enabled.cost !== undefined &&
+    b.enabled.cost !== undefined &&
+    scheduleIsStrictlyCheaper(a.marketCost.schedule, b.marketCost.schedule, maxContext) &&
+    scheduleIsStrictlyCheaper(a.enabled.cost, b.enabled.cost, maxContext);
 
   const chain = candidates
     .filter((candidate) =>
       candidates.every((other) => other === candidate || cheaper(candidate, other) || cheaper(other, candidate)),
     )
-    .toSorted((left, right) => {
-      if (cheaper(left, right)) return -1;
-      if (cheaper(right, left)) return 1;
-      return 0;
-    });
+    .toSorted((left, right) => Number(cheaper(right, left)) - Number(cheaper(left, right)));
 
   const [floor] = chain;
   if (!floor || candidates.filter((other) => cheaper(floor, other)).length !== candidates.length - 1) return [];

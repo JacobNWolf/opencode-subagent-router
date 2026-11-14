@@ -629,6 +629,56 @@ describe('resolveFast', () => {
     expect(decision.details).toEqual({ superseded: 2 });
   });
 
+  test('does not restore superseded or capability-rejected models through legacy fallback', () => {
+    const parent = enabledModel('acme', 'nebula-9-grand', baseSchedule(12, 48));
+    const modelsDev = syntheticCatalog([
+      { canonicalID: 'acme/nebula-9-grand', family: 'nebula-tier', cost: { input: 12, output: 48 } },
+      {
+        canonicalID: 'acme/nebula-9-small',
+        family: 'nebula-tier',
+        cost: { input: 1, output: 4 },
+        releaseDate: '2029-01-01',
+      },
+    ]);
+    const older = enabledModel('acme', 'nebula-9-small', baseSchedule(1, 4), { releaseDate: '2029-01-01' });
+    const incompatible = { ...older, limits: { context: 1_000, output: 16_000 } };
+
+    for (const candidate of [older, incompatible]) {
+      const enabled = [parent, candidate];
+      const ref = { providerID: 'acme', modelID: parent.modelID };
+      expect(resolveFast(ref, enabled, { modelsDev })).toBeUndefined();
+      expect(resolveFast({ ...ref, variant: 'high' }, enabled, { modelsDev })).toEqual({ ...ref, variant: 'low' });
+      expect(resolveFast(ref, enabled)).toEqual({ ...ref, modelID: candidate.modelID, variant: 'low' });
+      expect(resolveFast(ref, enabled, { modelsDev: { models: {}, providers: {} } })).toEqual({
+        ...ref,
+        modelID: candidate.modelID,
+        variant: 'low',
+      });
+    }
+  });
+
+  test('preserves legacy fallback for siblings without supersession or capability exclusions', () => {
+    const parent = enabledModel('acme', 'nebula-9-grand', baseSchedule(12, 48));
+    const incompatible = enabledModel('acme', 'nebula-9-small', baseSchedule(1, 4), {
+      limits: { context: 1_000, output: 16_000 },
+    });
+    const legacy = enabledModel('acme', 'nebula-8-small', baseSchedule(2, 8));
+    const modelsDev = syntheticCatalog([
+      { canonicalID: 'acme/nebula-9-grand', family: 'nebula-tier', cost: { input: 12, output: 48 } },
+      { canonicalID: 'acme/nebula-9-small', family: 'nebula-tier', cost: { input: 1, output: 4 } },
+      { canonicalID: 'acme/nebula-8-small', family: 'nebula-tier', cost: { input: 2, output: 8 } },
+    ]);
+
+    expect(
+      resolveFastDecision({ providerID: 'acme', modelID: parent.modelID }, [parent, incompatible, legacy], {
+        modelsDev,
+      }),
+    ).toMatchObject({
+      reason: 'exact_family_sibling',
+      rungs: [{ providerID: 'acme', modelID: legacy.modelID, variant: 'low' }],
+    });
+  });
+
   test('reports incomparable candidates dropped from the ladder', () => {
     const enabled = [
       enabledModel('openai', 'gpt-6-astra', baseSchedule(10, 50), { family: 'gpt-astra' }),

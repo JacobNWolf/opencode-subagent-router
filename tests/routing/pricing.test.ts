@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
+import { omit } from 'es-toolkit';
+
 import {
   cheapestChain,
   marketCost,
@@ -25,10 +27,11 @@ const estimate = (input: number, output: number, providerSamples = 1): CostEstim
   providerSamples,
 });
 
-function profile(modelID: string, market: CostEstimate): ModelProfile {
+function profile(modelID: string, market: CostEstimate, cost: PriceSchedule = market.schedule): ModelProfile {
   const enabled: EnabledModel = {
     providerID: 'acme',
     modelID,
+    cost,
     variants: new Set(),
   };
   return { enabled, marketCost: market };
@@ -148,6 +151,31 @@ describe('cheapestChain', () => {
 
   test('drops equal prices', () => {
     expect(cheapestChain([profile('a', estimate(1, 4)), profile('b', estimate(1, 4))], 100_000)).toEqual([]);
+  });
+
+  test('requires strict agreement between market and enabled prices', () => {
+    const small = profile('small', estimate(1, 4));
+    for (const actual of [schedule(0.5, 2), schedule(1, 4), schedule(2, 3)]) {
+      const other = profile('other', estimate(2, 8), actual);
+      expect(cheapestChain([small, other], 100_000)).toEqual([]);
+      expect(cheapestChain([other, small], 100_000)).toEqual([]);
+    }
+  });
+
+  test('rejects missing price sources on either candidate', () => {
+    const small = profile('small', estimate(1, 4));
+    const other = profile('other', estimate(2, 8));
+    for (const missing of [omit(small, ['marketCost']), { ...small, enabled: omit(small.enabled, ['cost']) }]) {
+      expect(cheapestChain([missing, other], 100_000)).toEqual([]);
+      expect(cheapestChain([other, missing], 100_000)).toEqual([]);
+    }
+  });
+
+  test('checks enabled price tiers across the parent context', () => {
+    const small = profile('small', estimate(1, 4), schedule(1, 4, [{ fromContext: 50_000, input: 10, output: 40 }]));
+    const other = profile('other', estimate(2, 8));
+    expect(ids(cheapestChain([other, small], 10_000))).toEqual(['small', 'other']);
+    expect(cheapestChain([other, small], 100_000)).toEqual([]);
   });
 
   test('rejects repeated references to the same candidate as an ambiguous floor', () => {

@@ -269,6 +269,7 @@ function resolveCrossModel(
   catalog: Catalog,
 ): {
   readonly rungs: readonly ModelRef[];
+  readonly legacyModels?: readonly EnabledModel[];
   readonly details?: Readonly<Record<string, unknown>>;
 } {
   const profiles = buildProfiles(enabledModels, catalog);
@@ -286,8 +287,18 @@ function resolveCrossModel(
 
   const chain = cheapestChain(candidates, parent.enabled.limits!.context);
   if (chain.length === 0) {
+    const excluded = profiles.filter(
+      (profile) =>
+        candidateSkip(parent, profile, parentRef) === 'capabilities' ||
+        (eligible.includes(profile) && !candidates.includes(profile)),
+    );
+    const legacyModels = enabledModels.filter(
+      (model) => !excluded.some((profile) => sameSelectableModel(model, profile.enabled)),
+    );
+
     return {
       rungs: [],
+      legacyModels,
       details: { crossModel: candidates.length === 0 ? 'no_eligible_candidate' : 'no_unique_cheapest' },
     };
   }
@@ -358,7 +369,7 @@ export function resolveFastDecision(
 
   const crossModel = context.modelsDev
     ? resolveCrossModel(parent, enabledModels, context.modelsDev)
-    : { rungs: [], details: { crossModel: 'models_dev_unavailable' } };
+    : { rungs: [], legacyModels: enabledModels, details: { crossModel: 'models_dev_unavailable' } };
   const details = crossModel.details === undefined ? {} : { details: crossModel.details };
   if (crossModel.rungs.length > 0) {
     return { rungs: crossModel.rungs, reason: 'same_generation_cheaper', ...details };
@@ -367,7 +378,7 @@ export function resolveFastDecision(
   const lowEffort = resolveLowEffort(parent, enabledModels);
   if (lowEffort) return { rungs: [lowEffort], reason: 'same_model_low', ...details };
 
-  const sibling = resolveLegacySibling(parent, enabledModels);
+  const sibling = resolveLegacySibling(parent, crossModel.legacyModels ?? enabledModels);
   if (sibling) return { rungs: [sibling], reason: 'exact_family_sibling', ...details };
 
   return { rungs: [], reason: 'no_fast_target', ...details };
