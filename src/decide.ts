@@ -10,7 +10,7 @@ const KEEP_NOUL = 0.55;
 const STEP_UP_NOUL = 0.35;
 
 export function decide(answers: JevAnswers, rungCount: number, confidenceMin = 0.5): Verdict {
-  if (answers.kind.confidence < confidenceMin || answers.reasoning.confidence < confidenceMin) {
+  if (answers.kind.confidence < confidenceMin) {
     return { action: 'keep', reason: 'low_confidence' };
   }
 
