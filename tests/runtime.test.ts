@@ -35,6 +35,10 @@ describe('parseOptions', () => {
       fast: { model: 'openai/luna', variant: 'low' },
     };
     const stringVariant = { parent: { model: 'openai/sol', variant: 'high' }, fast: { model: 'openai/luna' } };
+    const ladder = {
+      parent: { model: 'openai/astra' },
+      fast: [{ model: 'openai/luna', variant: 'low' }, { model: 'openai/sol' }],
+    };
     expect(
       parseOptions({
         timeoutMs: 500,
@@ -48,11 +52,14 @@ describe('parseOptions', () => {
           { parent: { model: 'x', variant: 3 }, fast: { model: 'y' } },
           { parent: { model: 'x', variant: ['high', 3] }, fast: { model: 'y' } },
           { parent: { model: 'x' }, fast: { model: 3 } },
+          { parent: { model: 'x' }, fast: [] },
+          { parent: { model: 'x' }, fast: [{ model: 3 }] },
           valid,
           stringVariant,
+          ladder,
         ],
       }),
-    ).toEqual({ timeoutMs: 500, confidenceMin: 0, routes: [valid, stringVariant] });
+    ).toEqual({ timeoutMs: 500, confidenceMin: 0, routes: [valid, stringVariant, ladder] });
   });
 });
 

@@ -61,10 +61,6 @@ function sameModel(left: ModelRef, right: ModelRef): boolean {
   );
 }
 
-/**
- * Shared by the V1 and V2 entrypoints: picks a fast target for a direct child task, then asks Jev whether the task
- * can take it. Returns nothing when the parent should be kept without asking.
- */
 function makeRouter(
   dependencies: RouterDependencies,
   options: RouterOptions,
@@ -103,8 +99,9 @@ function makeRouter(
         ...(modelsDev === undefined ? {} : { modelsDev }),
       });
 
-      const fast = resolution.target;
-      if (!fast) {
+      const { rungs } = resolution;
+      const [cheapest] = rungs;
+      if (!cheapest) {
         yield* log('debug', 'no_fast_target', { parent, reason: resolution.reason });
         return undefined;
       }
@@ -124,13 +121,22 @@ function makeRouter(
         timeoutMs: options.timeoutMs,
       });
 
-      const verdict = decide(answers, options.confidenceMin);
+      const verdict = decide(answers, rungs.length, options.confidenceMin);
+      const rung = verdict.action === 'downgrade' ? verdict.rung : 0;
+      const fast = rungs[rung] ?? cheapest;
+
       yield* log('info', verdict.reason, {
         answers,
         fast,
         parent,
-        routing: { reason: resolution.reason, ...resolution.details },
+        routing: {
+          reason: resolution.reason,
+          rungs,
+          ...(verdict.action === 'downgrade' ? { rung: verdict.rung } : {}),
+          ...resolution.details,
+        },
       });
+
       return { fast, verdict };
     });
 }

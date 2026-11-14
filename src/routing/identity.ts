@@ -138,8 +138,8 @@ export function generationKeyOf(canonicalID: string, family?: string): Generatio
 
 export function canonicalIdentityOf(canonicalID: string, family?: string): CanonicalIdentity | undefined {
   const key = generationKeyOf(canonicalID, family);
-  if (!key) return undefined;
-  return { id: canonicalID, lab: key.lab, lineage: key.lineage, generation: key.major };
+  if (!key || family === undefined) return undefined;
+  return { id: canonicalID, lab: key.lab, lineage: key.lineage, family, generation: key.major };
 }
 
 export function sameGeneration(left: CanonicalIdentity, right: CanonicalIdentity): boolean {

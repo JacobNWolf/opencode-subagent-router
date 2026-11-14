@@ -100,6 +100,7 @@ function syntheticCatalog(
     readonly canonicalID: string;
     readonly family: string;
     readonly cost: ModelCost;
+    readonly releaseDate?: string;
     readonly providerID?: string;
     readonly modelID?: string;
   }[],
@@ -108,7 +109,8 @@ function syntheticCatalog(
   const providers: Catalog['providers'] = {};
 
   for (const entry of entries) {
-    models[entry.canonicalID] = metadata(entry.canonicalID, entry.family);
+    const released = entry.releaseDate === undefined ? {} : { release_date: entry.releaseDate };
+    models[entry.canonicalID] = { ...metadata(entry.canonicalID, entry.family), ...released };
     const providerID = entry.providerID ?? entry.canonicalID.slice(0, entry.canonicalID.indexOf('/'));
     const modelID = entry.modelID ?? entry.canonicalID.slice(entry.canonicalID.indexOf('/') + 1);
     const provider = providers[providerID] ?? {
@@ -119,7 +121,7 @@ function syntheticCatalog(
       doc: 'https://example.test',
       models: {},
     };
-    provider.models[modelID] = providerModel(modelID, entry.family, entry.cost);
+    provider.models[modelID] = providerModel(modelID, entry.family, entry.cost, released);
     providers[providerID] = provider;
   }
 
@@ -135,12 +137,14 @@ describe('matchRoute', () => {
         fast: { model: 'openai/gpt-terra' },
       },
     ];
-    expect(matchRoute(sol, routes)).toEqual({ providerID: 'openai', modelID: 'gpt-terra' });
-    expect(matchRoute({ ...sol, variant: 'medium' }, routes)).toEqual({
-      providerID: 'openai',
-      modelID: 'gpt-luna',
-      variant: 'low',
-    });
+    expect(matchRoute(sol, routes)).toEqual([{ providerID: 'openai', modelID: 'gpt-terra' }]);
+    expect(matchRoute({ ...sol, variant: 'medium' }, routes)).toEqual([
+      {
+        providerID: 'openai',
+        modelID: 'gpt-luna',
+        variant: 'low',
+      },
+    ]);
   });
 
   test('supports string and implicit default variants', () => {
@@ -148,11 +152,13 @@ describe('matchRoute', () => {
       parent: { model: 'openai/gpt-sol', variant: 'default' },
       fast: { model: 'openai/gpt-luna' },
     };
-    expect(matchRoute({ providerID: 'openai', modelID: 'gpt-sol' }, [route])).toEqual({
-      providerID: 'openai',
-      modelID: 'gpt-luna',
-    });
-    expect(matchRoute(sol, [{ ...route, parent: { ...route.parent, variant: 'low' } }])).toBeUndefined();
+    expect(matchRoute({ providerID: 'openai', modelID: 'gpt-sol' }, [route])).toEqual([
+      {
+        providerID: 'openai',
+        modelID: 'gpt-luna',
+      },
+    ]);
+    expect(matchRoute(sol, [{ ...route, parent: { ...route.parent, variant: 'low' } }])).toEqual([]);
   });
 
   test('ignores unrelated and malformed targets', () => {
@@ -161,7 +167,17 @@ describe('matchRoute', () => {
       { parent: { model: 'openai/gpt-sol' }, fast: { model: '/missing-provider' } },
       { parent: { model: 'openai/gpt-sol' }, fast: { model: 'missing-model/' } },
     ];
-    expect(matchRoute(sol, routes)).toBeUndefined();
+    expect(matchRoute(sol, routes)).toEqual([]);
+  });
+
+  test('falls back past malformed targets without changing the configured route order', () => {
+    const routes: Route[] = [
+      { parent: { model: 'openai/gpt-sol' }, fast: { model: 'openai/gpt-luna' } },
+      { parent: { model: 'openai/gpt-sol' }, fast: [{ model: '/missing-provider' }] },
+    ];
+    const original = routes.slice();
+    expect(matchRoute(sol, routes)).toEqual([{ providerID: 'openai', modelID: 'gpt-luna' }]);
+    expect(routes).toEqual(original);
   });
 });
 
@@ -308,6 +324,14 @@ describe('resolveFast', () => {
       modelID: 'gpt-6-luna',
       variant: 'low',
     });
+    const astra = { providerID: 'openai', modelID: 'gpt-6-astra', variant: 'high' };
+    expect(resolveFastDecision(astra, enabled, { modelsDev }).rungs).toEqual([
+      { providerID: 'openai', modelID: 'gpt-6-luna', variant: 'low' },
+      { providerID: 'openai', modelID: 'gpt-6-sol', variant: 'low' },
+    ]);
+    expect(
+      resolveFastDecision({ ...astra, modelID: 'gpt-6-sol' }, enabled, { modelsDev }).rungs.map((r) => r.modelID),
+    ).toEqual(['gpt-6-luna']);
   });
 
   test('routes Claude Fable 5.1 and Opus 5.5 to Sonnet 5', () => {
@@ -327,6 +351,11 @@ describe('resolveFast', () => {
     expect(
       resolveFast({ providerID: 'anthropic', modelID: 'claude-opus-5-5', variant: 'high' }, enabled, { modelsDev }),
     ).toEqual({ providerID: 'anthropic', modelID: 'claude-sonnet-5', variant: 'low' });
+    expect(
+      resolveFastDecision({ providerID: 'anthropic', modelID: 'claude-fable-5-1', variant: 'high' }, enabled, {
+        modelsDev,
+      }).rungs.map((r) => r.modelID),
+    ).toEqual(['claude-sonnet-5']);
   });
 
   test('routes Claude Agent aliases with subscription pricing to the cheapest same-generation model', () => {
@@ -346,12 +375,17 @@ describe('resolveFast', () => {
       omit(enabledModel('claude-agent', modelID, baseSchedule(0, 0), { name }), ['cost', 'family', 'releaseDate']);
     const enabled = [agent('fable', 'Fable 5.1'), agent('opus', 'Opus 5.5'), agent('haiku', 'Haiku 5.5')];
 
-    for (const modelID of ['fable', 'opus']) {
-      expect(resolveFastDecision({ providerID: 'claude-agent', modelID }, enabled, { modelsDev })).toEqual({
-        target: { providerID: 'claude-agent', modelID: 'haiku', variant: 'low' },
-        reason: 'same_generation_cheaper',
-      });
-    }
+    expect(resolveFastDecision({ providerID: 'claude-agent', modelID: 'fable' }, enabled, { modelsDev })).toEqual({
+      rungs: [
+        { providerID: 'claude-agent', modelID: 'haiku', variant: 'low' },
+        { providerID: 'claude-agent', modelID: 'opus', variant: 'low' },
+      ],
+      reason: 'same_generation_cheaper',
+    });
+    expect(resolveFastDecision({ providerID: 'claude-agent', modelID: 'opus' }, enabled, { modelsDev })).toEqual({
+      rungs: [{ providerID: 'claude-agent', modelID: 'haiku', variant: 'low' }],
+      reason: 'same_generation_cheaper',
+    });
   });
 
   test('does not select an older major generation', () => {
@@ -491,7 +525,7 @@ describe('resolveFast', () => {
     });
     expect(decision).toMatchObject({
       reason: 'same_model_low',
-      target: { providerID: 'openai', modelID: 'gpt-5.6-sol', variant: 'low' },
+      rungs: [{ providerID: 'openai', modelID: 'gpt-5.6-sol', variant: 'low' }],
       details: { crossModel: 'no_eligible_candidate' },
     });
   });
@@ -553,8 +587,98 @@ describe('resolveFast', () => {
       resolveFastDecision({ providerID: 'acme', modelID: 'nebula-9-grand', variant: 'high' }, enabled, { modelsDev }),
     ).toMatchObject({
       reason: 'same_model_low',
-      target: { providerID: 'acme', modelID: 'nebula-9-grand', variant: 'low' },
+      rungs: [{ providerID: 'acme', modelID: 'nebula-9-grand', variant: 'low' }],
       details: { crossModel: 'no_eligible_candidate' },
+    });
+  });
+
+  test('builds a three-rung ladder for a four-tier family and drops superseded versions', () => {
+    const tiers = [
+      // Live Models.dev prices, 2026-11.
+      ['claude-fable-5-2', 'claude-fable', 8, 40, '2026-11-09'],
+      ['claude-fable-5-1', 'claude-fable', 10, 50, '2026-09-01'],
+      ['claude-opus-5', 'claude-opus', 5, 25, '2026-07-24'],
+      ['claude-opus-5-5', 'claude-opus', 4, 20, '2026-09-22'],
+      ['claude-sonnet-5', 'claude-sonnet', 2, 10, '2026-06-29'],
+      ['claude-sonnet-5-5', 'claude-sonnet', 2, 10, '2026-09-28'],
+      ['claude-haiku-5-5', 'claude-haiku', 0.1, 0.5, '2026-10-07'],
+    ] as const;
+    const enabled = tiers.map(([id, family, input, output, releaseDate]) =>
+      enabledModel('anthropic', id, baseSchedule(input, output), { family, releaseDate }),
+    );
+    const modelsDev = syntheticCatalog(
+      tiers.map(([id, family, input, output, releaseDate]) => ({
+        canonicalID: `anthropic/${id}`,
+        family,
+        cost: { input, output },
+        releaseDate,
+      })),
+    );
+    const decision = resolveFastDecision(
+      { providerID: 'anthropic', modelID: 'claude-fable-5-2', variant: 'high' },
+      enabled,
+      { modelsDev },
+    );
+    // Sonnet 5 and 5.5 tie on price; without the superseded filter both drop and the ladder skips Sonnet.
+    expect(decision.rungs.map((rung) => rung.modelID)).toEqual([
+      'claude-haiku-5-5',
+      'claude-sonnet-5-5',
+      'claude-opus-5-5',
+    ]);
+    // Fable 5.1 costs more than the parent, so it is excluded on price rather than superseded.
+    expect(decision.details).toEqual({ superseded: 2 });
+  });
+
+  test('reports incomparable candidates dropped from the ladder', () => {
+    const enabled = [
+      enabledModel('openai', 'gpt-6-astra', baseSchedule(10, 50), { family: 'gpt-astra' }),
+      enabledModel('openai', 'gpt-6-sol', baseSchedule(2, 20), { family: 'gpt-sol' }),
+      enabledModel('openai', 'gpt-6-terra', baseSchedule(6, 8), { family: 'gpt-terra' }),
+      enabledModel('openai', 'gpt-6-luna', baseSchedule(0.1, 0.5), { family: 'gpt-luna' }),
+    ];
+    const modelsDev = syntheticCatalog([
+      { canonicalID: 'openai/gpt-6-astra', family: 'gpt-astra', cost: { input: 10, output: 50 } },
+      { canonicalID: 'openai/gpt-6-sol', family: 'gpt-sol', cost: { input: 2, output: 20 } },
+      { canonicalID: 'openai/gpt-6-terra', family: 'gpt-terra', cost: { input: 6, output: 8 } },
+      { canonicalID: 'openai/gpt-6-luna', family: 'gpt-luna', cost: { input: 0.1, output: 0.5 } },
+    ]);
+    expect(
+      resolveFastDecision({ providerID: 'openai', modelID: 'gpt-6-astra', variant: 'high' }, enabled, { modelsDev }),
+    ).toEqual({
+      rungs: [{ providerID: 'openai', modelID: 'gpt-6-luna', variant: 'low' }],
+      reason: 'same_generation_cheaper',
+      details: { crossModel: 'incomparable_candidates', dropped: 2 },
+    });
+  });
+
+  test('keeps explicit route order and drops invalid rungs', () => {
+    const routes: Route[] = [
+      {
+        parent: { model: 'openai/gpt-sol' },
+        fast: [
+          { model: 'openai/gpt-luna', variant: 'low' },
+          { model: 'openai/gpt-sol', variant: 'max' },
+          { model: 'openai/gpt-terra' },
+        ],
+      },
+    ];
+    expect(resolveFastDecision(sol, [], { routes })).toEqual({
+      rungs: [
+        { providerID: 'openai', modelID: 'gpt-luna', variant: 'low' },
+        { providerID: 'openai', modelID: 'gpt-terra' },
+      ],
+      reason: 'explicit_route',
+    });
+  });
+
+  test('falls through when every explicit rung is invalid', () => {
+    const routes: Route[] = [
+      { parent: { model: 'openai/gpt-sol' }, fast: [{ model: 'openai/gpt-sol', variant: 'max' }] },
+    ];
+    expect(resolveFastDecision(sol, [self], { routes })).toEqual({
+      rungs: [{ ...sol, variant: 'low' }],
+      reason: 'same_model_low',
+      details: { crossModel: 'models_dev_unavailable' },
     });
   });
 });

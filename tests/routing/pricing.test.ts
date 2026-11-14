@@ -1,11 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  cheapestChain,
   marketCost,
   median,
   priceScheduleOf,
   scheduleIsStrictlyCheaper,
-  uniqueCheapest,
 } from '../../src/routing/pricing';
 import type { CostEstimate, EnabledModel, ModelProfile, PriceSchedule } from '../../src/routing/types';
 
@@ -96,13 +96,68 @@ describe('schedule comparison', () => {
   });
 });
 
-describe('uniqueCheapest', () => {
-  test('selects a unique dominating candidate', () => {
-    const winner = uniqueCheapest([profile('middle', estimate(4, 16)), profile('small', estimate(1, 4))], 100_000);
-    expect(winner?.enabled.modelID).toBe('small');
+describe('cheapestChain', () => {
+  const ids = (profiles: readonly ModelProfile[]) => profiles.map((p) => p.enabled.modelID);
+
+  test('orders a strict price chain cheapest first', () => {
+    const chain = cheapestChain(
+      [profile('mid', estimate(4, 16)), profile('small', estimate(1, 4)), profile('big', estimate(8, 32))],
+      100_000,
+    );
+    expect(ids(chain)).toEqual(['small', 'mid', 'big']);
   });
 
-  test('returns nothing on an ambiguous cost frontier', () => {
-    expect(uniqueCheapest([profile('a', estimate(1, 8)), profile('b', estimate(2, 4))], 100_000)).toBeUndefined();
+  test('orders equal base prices by savings at later tiers, regardless of catalog order', () => {
+    const tiers = [1, 2, 3].map((price) =>
+      profile(`tier-${price}`, {
+        schedule: schedule(1, 4, [{ fromContext: 50_000, input: price, output: price * 4 }]),
+        providerSamples: 1,
+      }),
+    );
+    for (const order of [
+      [0, 1, 2],
+      [0, 2, 1],
+      [1, 0, 2],
+      [1, 2, 0],
+      [2, 0, 1],
+      [2, 1, 0],
+    ]) {
+      expect(
+        ids(
+          cheapestChain(
+            order.map((index) => tiers[index]!),
+            100_000,
+          ),
+        ),
+      ).toEqual(['tier-1', 'tier-2', 'tier-3']);
+    }
+  });
+
+  test('drops an incomparable middle pair and keeps the floor', () => {
+    const chain = cheapestChain(
+      [profile('small', estimate(1, 4)), profile('a', estimate(2, 20)), profile('b', estimate(6, 8))],
+      100_000,
+    );
+    expect(ids(chain)).toEqual(['small']);
+  });
+
+  test('returns nothing when the floor is ambiguous', () => {
+    const candidates = [profile('a', estimate(1, 8)), profile('b', estimate(2, 4)), profile('c', estimate(10, 10))];
+    expect(cheapestChain(candidates, 100_000)).toEqual([]);
+  });
+
+  test('drops equal prices', () => {
+    expect(cheapestChain([profile('a', estimate(1, 4)), profile('b', estimate(1, 4))], 100_000)).toEqual([]);
+  });
+
+  test('compares tiers only up to the parent context', () => {
+    const tiered = (modelID: string, input: number, over: number) =>
+      profile(modelID, {
+        schedule: schedule(input, input * 4, [{ fromContext: 200_000, input: over, output: over * 4 }]),
+        providerSamples: 1,
+      });
+    const candidates = [tiered('small', 1, 20), tiered('mid', 4, 8)];
+    expect(ids(cheapestChain(candidates, 100_000))).toEqual(['small', 'mid']);
+    expect(cheapestChain(candidates, 1_000_000)).toEqual([]);
   });
 });
