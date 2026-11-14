@@ -1,6 +1,6 @@
 {
   "name": "@jacobwolf/opencode-subagent-router",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Route simple OpenCode subagent tasks to faster models with Jev.",
   "keywords": [
     "jev",
